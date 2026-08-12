@@ -1,0 +1,35 @@
+# —— 虚拟环境 ——
+.venv/
+.venv313/
+venv/
+.env
+
+# —— 构建产物（与源码分离，勿提交）——
+build/
+dist/
+release/
+*.spec.bak
+
+# —— Python ——
+__pycache__/
+*.py[cod]
+*$py.class
+*.egg-info/
+.pytest_cache/
+.mypy_cache/
+
+# —— 运行时数据（校准/设置/截图缓存）——
+data/
+
+# —— 本地工具二进制（体积大；构建脚本可再下载）——
+platform-tools/
+tools/*.exe
+tools/*.dll
+
+# —— IDE / 杂项 ——
+.idea/
+.vscode/
+*.log
+*.zip
+Thumbs.db
+Desktop.ini
