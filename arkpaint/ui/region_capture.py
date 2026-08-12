@@ -78,9 +78,9 @@ class RegionCaptureOverlay(QWidget):
 
         p.setPen(QColor(240, 244, 250))
         p.drawText(
-            20,
-            28,
-            "拖拽框选要转换的区域 · 松开鼠标确认 · Esc 取消",
+            QRect(20, 12, 640, 48),
+            Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignTop,
+            "拖拽框选大致区域 · 松开确认 · Esc 取消\n（随后可再拖正方形框精确裁切）",
         )
 
     def mousePressEvent(self, event) -> None:
@@ -104,6 +104,8 @@ class RegionCaptureOverlay(QWidget):
             if sel.width() >= 4 and sel.height() >= 4:
                 cropped = self._bg.copy(sel)
                 self._finished = True
+                # 先隐藏遮罩，再发信号，避免接收方同步弹模态窗时被本层挡住
+                self.hide()
                 self.captured.emit(cropped)
                 self.close()
             else:

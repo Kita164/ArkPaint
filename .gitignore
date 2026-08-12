@@ -9,6 +9,8 @@ build/
 dist/
 release/
 *.spec.bak
+# 由打包脚本从 PNG 生成，可不提交
+assets/logo/*.ico
 
 # —— Python ——
 __pycache__/

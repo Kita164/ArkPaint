@@ -33,6 +33,7 @@ DATA_DIR = ROOT_DIR / "data"
 CALIBRATION_PATH = DATA_DIR / "calibration.json"
 SETTINGS_PATH = DATA_DIR / "settings.json"
 REFERENCE_IMAGE = ASSETS_DIR / "reference.png"
+LOGO_PATH = ASSETS_DIR / "logo" / "ArkPaint.png"
 
 
 def ensure_dirs() -> None:

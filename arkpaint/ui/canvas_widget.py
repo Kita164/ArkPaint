@@ -274,8 +274,8 @@ class PixelCanvas(QWidget):
         cell_w = board.width() / GRID_SIZE
         cell_h = board.height() / GRID_SIZE
 
-        painter.fillRect(self.rect(), QColor(32, 34, 38))
-        painter.fillRect(board, QColor(245, 245, 245))
+        painter.fillRect(self.rect(), QColor(42, 42, 42))
+        painter.fillRect(board, QColor(224, 247, 247))
 
         # 放大时编号字号随格子变大，但设上限以免糊成一团
         font_px = max(7, min(22, int(min(cell_w, cell_h) * 0.32)))
@@ -318,7 +318,7 @@ class PixelCanvas(QWidget):
 
         # 边缘感应提示条（仅放大时）
         if self._zoom > _MIN_ZOOM + 1e-6:
-            hint = QColor(90, 160, 255, 35)
+            hint = QColor(42, 130, 244, 40)
             painter.fillRect(0, 0, _EDGE_PX, self.height(), hint)
             painter.fillRect(self.width() - _EDGE_PX, 0, _EDGE_PX, self.height(), hint)
             painter.fillRect(0, 0, self.width(), _EDGE_PX, hint)
@@ -332,7 +332,7 @@ class PixelCanvas(QWidget):
                 int(cell_w),
                 int(cell_h),
             )
-            painter.setPen(QPen(QColor(0, 200, 255), 2))
+            painter.setPen(QPen(QColor(0x5E, 0xC8, 0xC0), 2))
             painter.drawRect(rect.adjusted(1, 1, -1, -1))
 
     def to_qimage(self, scale: int = 16) -> QImage:

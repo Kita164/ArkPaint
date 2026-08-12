@@ -37,10 +37,10 @@ class PalettePanel(QWidget):
         layout = QVBoxLayout(self)
         layout.setContentsMargins(8, 8, 8, 8)
         title = QLabel("颜料")
-        title.setStyleSheet("font-size: 16px; font-weight: 700; color: #f0f0f0;")
+        title.setObjectName("sectionTitle")
         layout.addWidget(title)
         hint = QLabel("点击选色 · 编号与游戏色盘顺序对应")
-        hint.setStyleSheet("color: #9aa0a6; font-size: 11px;")
+        hint.setObjectName("muted")
         hint.setWordWrap(True)
         layout.addWidget(hint)
 
@@ -144,8 +144,8 @@ class _PaletteGrid(QWidget):
 
     def paintEvent(self, _event) -> None:
         p = QPainter(self)
-        p.fillRect(self.rect(), QColor(40, 42, 46))
-        font = QFont("Segoe UI", 10)
+        p.fillRect(self.rect(), QColor(42, 42, 42))
+        font = QFont("Consolas", 10)
         font.setBold(True)
         p.setFont(font)
         stride = self._cell + self._gap
@@ -156,15 +156,15 @@ class _PaletteGrid(QWidget):
             rect_y = _PAD + row * stride
             p.fillRect(rect_x, rect_y, self._cell, self._cell, QColor(*color.rgb))
 
-            # 当前绘制色：青色粗框（对应游戏选中态）
+            # 当前绘制色：青绿粗框；选中：亮黄框（呼应 logo）
             if self._drawing == color.index:
-                p.setPen(QPen(QColor(0, 220, 255), 3))
+                p.setPen(QPen(QColor(0x5E, 0xC8, 0xC0), 3))
                 p.drawRect(rect_x + 1, rect_y + 1, self._cell - 3, self._cell - 3)
             elif self._active == color.index:
-                p.setPen(QPen(QColor(255, 210, 60), 2))
+                p.setPen(QPen(QColor(0xFF, 0xD7, 0x00), 2))
                 p.drawRect(rect_x + 1, rect_y + 1, self._cell - 3, self._cell - 3)
             else:
-                p.setPen(QPen(QColor(0, 0, 0, 40), 1))
+                p.setPen(QPen(QColor(0x1A, 0x1A, 0x1A), 2))
                 p.drawRect(rect_x, rect_y, self._cell - 1, self._cell - 1)
 
             if self._show_numbers:

@@ -7,12 +7,14 @@ import sys
 from PySide6.QtWidgets import QApplication
 
 from arkpaint.ui.main_window import MainWindow
+from arkpaint.ui.theme import apply_app_theme
 
 
 def main() -> int:
     app = QApplication(sys.argv)
     app.setApplicationName("ArkPaint")
     app.setOrganizationName("ArkPaint")
+    apply_app_theme(app)
     window = MainWindow()
     window.show()
     return app.exec()

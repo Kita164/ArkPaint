@@ -10,7 +10,6 @@ from PySide6.QtGui import QDragEnterEvent, QDropEvent, QKeySequence, QPixmap, QS
 from PySide6.QtWidgets import (
     QApplication,
     QCheckBox,
-    QDoubleSpinBox,
     QFileDialog,
     QFrame,
     QHBoxLayout,
@@ -22,12 +21,13 @@ from PySide6.QtWidgets import (
     QPushButton,
     QScrollArea,
     QSizePolicy,
-    QSpinBox,
     QSplitter,
     QStatusBar,
     QVBoxLayout,
     QWidget,
 )
+
+from arkpaint.ui.theme import app_icon, logo_path
 
 from arkpaint.config import (
     DATA_DIR,
@@ -44,7 +44,8 @@ from arkpaint.config import (
     save_json,
 )
 from arkpaint.core.adb import AdbController, AdbError
-from arkpaint.core.calibration import CalibrationData, load_calibration
+from arkpaint.core.auto_calibrate import auto_calibrate
+from arkpaint.core.calibration import CalibrationData, load_calibration, save_calibration
 from arkpaint.core.image_processor import blank_grid, image_to_grid
 from arkpaint.core.painter import AutoPainter, PaintOptions, PaintProgress
 from arkpaint.core.palette import DEFAULT_PALETTE, PaletteColor, find_white_index, rebuild_palette
@@ -52,15 +53,10 @@ from arkpaint.paths import find_adb, mumu_instance_label
 from arkpaint.ui.calibrate_dialog import CalibrateDialog
 from arkpaint.ui.canvas_widget import PixelCanvas
 from arkpaint.ui.palette_widget import PalettePanel
-from arkpaint.ui.toggle_switch import LightToggleSwitch
+from arkpaint.ui.square_crop_dialog import crop_square_interactive
+from arkpaint.ui.toggle_switch import LightToggleSwitch, NoWheelDoubleSpinBox, NoWheelSpinBox
 
 _IMAGE_SUFFIXES = {".png", ".jpg", ".jpeg", ".bmp", ".webp", ".gif"}
-_PREVIEW_EMPTY_STYLE = (
-    "background:#e8eaed; border:1px dashed #b8bec8; border-radius:4px; color:#6b7280;"
-)
-_PREVIEW_FILLED_STYLE = (
-    "background:#e8eaed; border:1px solid #c5c9d0; border-radius:4px; color:#6b7280;"
-)
 
 
 class ImagePreviewLabel(QLabel):
@@ -144,6 +140,7 @@ class MainWindow(QMainWindow):
         super().__init__()
         ensure_dirs()
         self.setWindowTitle("ArkPaint · 拼豆自动绘图")
+        self.setWindowIcon(app_icon())
         self.resize(1180, 760)
 
         self.adb = AdbController()
@@ -152,11 +149,11 @@ class MainWindow(QMainWindow):
         self._apply_sampled_palette()
         self._worker: PaintWorker | None = None
         self._settings = load_json(SETTINGS_PATH, {})
-        # 每次 ADB 连接后，首次「开始自动绘图」前必须完成一次校准
-        self._needs_calib_before_paint = False
         self._source_image_path: str | None = None
         self._source_pixmap: QPixmap | None = None
         self._was_maximized = False
+        self._pending_capture_pix: QPixmap | None = None
+        self._capture_overlay = None
 
         self._build_ui()
         self._build_status()
@@ -215,6 +212,8 @@ class MainWindow(QMainWindow):
         lv.setContentsMargins(8, 8, 8, 8)
         lv.setSpacing(6)
 
+        lv.addLayout(self._build_brand_header())
+
         # —— 导入图片 + 原图预览 ——
         lv.addWidget(self._section_title("导入图片"))
         import_row = QHBoxLayout()
@@ -228,28 +227,28 @@ class MainWindow(QMainWindow):
         lv.addLayout(import_row)
 
         self.preview_label = ImagePreviewLabel()
+        self.preview_label.setObjectName("previewEmpty")
         self.preview_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
         self.preview_label.setMinimumHeight(120)
         self.preview_label.setMaximumHeight(160)
         self.preview_label.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
-        self.preview_label.setStyleSheet(_PREVIEW_EMPTY_STYLE)
         self.preview_label.setText("拖入图片到此处\n或点击上方按钮")
         self.preview_label.setScaledContents(False)
         self.preview_label.files_dropped.connect(self._on_files_dropped)
         lv.addWidget(self.preview_label)
         self.preview_name = QLabel("")
+        self.preview_name.setObjectName("muted")
         self.preview_name.setWordWrap(True)
-        self.preview_name.setStyleSheet("color:#9aa0a6; font-size:11px;")
         lv.addWidget(self.preview_name)
 
         lv.addSpacing(6)
         lv.addWidget(self._section_title("像素预览"))
         self.pixel_thumb = QLabel("尚无像素图")
+        self.pixel_thumb.setObjectName("previewEmpty")
         self.pixel_thumb.setAlignment(Qt.AlignmentFlag.AlignCenter)
         self.pixel_thumb.setMinimumHeight(120)
         self.pixel_thumb.setMaximumHeight(160)
         self.pixel_thumb.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
-        self.pixel_thumb.setStyleSheet(_PREVIEW_EMPTY_STYLE)
         self.pixel_thumb.setToolTip("当前画板效果缩略图，随涂色实时更新")
         lv.addWidget(self.pixel_thumb)
 
@@ -257,21 +256,22 @@ class MainWindow(QMainWindow):
         # —— ADB 连接 ——
         lv.addWidget(self._section_title("连接设置"))
         self.host_edit = QLineEdit(DEFAULT_ADB_HOST)
-        self.port_spin = QSpinBox()
+        self.port_spin = NoWheelSpinBox()
         self.port_spin.setRange(1, 65535)
         self.port_spin.setValue(DEFAULT_ADB_PORT)
+        self.port_spin.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
         lv.addWidget(QLabel("主机"))
         lv.addWidget(self.host_edit)
-        lv.addWidget(QLabel("ADB 端口"))
+        lv.addWidget(QLabel("ADB 端口（默认 16384）"))
         lv.addWidget(self.port_spin)
         port_hint = QLabel(
-            f"MuMu 多开端口：0号 {MUMU_ADB_BASE_PORT}，"
-            f"之后每个 +{MUMU_ADB_PORT_STEP}"
+            f"默认连接 0 号模拟器端口 {MUMU_ADB_BASE_PORT}；"
+            f"多开时每个 +{MUMU_ADB_PORT_STEP}"
             f"（1号 {MUMU_ADB_BASE_PORT + MUMU_ADB_PORT_STEP}，"
             f"2号 {MUMU_ADB_BASE_PORT + MUMU_ADB_PORT_STEP * 2}…）"
         )
+        port_hint.setObjectName("muted")
         port_hint.setWordWrap(True)
-        port_hint.setStyleSheet("color:#9aa0a6; font-size:11px;")
         lv.addWidget(port_hint)
 
         lv.addWidget(QLabel("adb.exe 路径"))
@@ -296,19 +296,21 @@ class MainWindow(QMainWindow):
         lv.addLayout(adb_btn_row)
 
         self.device_label = QLabel("未连接")
+        self.device_label.setObjectName("muted")
         self.device_label.setWordWrap(True)
-        self.device_label.setStyleSheet("color:#9aa0a6;")
         lv.addWidget(self.device_label)
 
         lv.addSpacing(8)
         lv.addWidget(self._section_title("绘制参数"))
-        self.conf_spin = QDoubleSpinBox()
+        self.conf_spin = NoWheelDoubleSpinBox()
         self.conf_spin.setRange(0.3, 0.99)
         self.conf_spin.setSingleStep(0.01)
         self.conf_spin.setValue(DEFAULT_DETECT_CONFIDENCE)
-        self.delay_spin = QSpinBox()
+        self.conf_spin.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
+        self.delay_spin = NoWheelSpinBox()
         self.delay_spin.setRange(10, 500)
         self.delay_spin.setValue(DEFAULT_TAP_DELAY_MS)
+        self.delay_spin.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
         self.skip_white = QCheckBox("跳过白色格子（少点）")
         self.skip_white.setChecked(True)
         lv.addWidget(QLabel("识别置信度阈值"))
@@ -320,13 +322,13 @@ class MainWindow(QMainWindow):
         lv.addSpacing(8)
         tip = QLabel(
             "使用说明：\n"
-            "1. 导入/拖入/截图得到像素图\n"
+            "1. 导入/拖入/截图 → 拖动正方形框选区域 → 转为 24×24\n"
             "2. 连接 MuMu ADB\n"
-            "3. 打开游戏拼豆编辑页\n"
-            "4. 右侧「校准并识别」后开始绘图"
+            "3. 打开游戏拼豆编辑页（色板默认在顶部）\n"
+            "4. 点「开始绘图」即可（自动识别画布与色板）"
         )
+        tip.setObjectName("hint")
         tip.setWordWrap(True)
-        tip.setStyleSheet("color:#b0b4ba; font-size:12px;")
         lv.addWidget(tip)
         lv.addStretch(1)
 
@@ -347,22 +349,22 @@ class MainWindow(QMainWindow):
         tools_row.setSpacing(10)
 
         self.btn_undo = QPushButton("撤回")
+        self.btn_undo.setObjectName("toolButton")
         self.btn_undo.setEnabled(False)
         self.btn_undo.setToolTip("撤回上一次涂色（Ctrl+Z）")
         self.btn_undo.setCursor(Qt.CursorShape.PointingHandCursor)
-        self.btn_undo.setStyleSheet(self._tool_btn_style())
         self.btn_undo.clicked.connect(self.undo_canvas)
         tools_row.addWidget(self.btn_undo)
 
         self.btn_export = QPushButton("导出")
+        self.btn_export.setObjectName("toolButton")
         self.btn_export.setToolTip("将当前像素图导出为 PNG 图片")
         self.btn_export.setCursor(Qt.CursorShape.PointingHandCursor)
-        self.btn_export.setStyleSheet(self._tool_btn_style())
         self.btn_export.clicked.connect(self.export_pixel_image)
         tools_row.addWidget(self.btn_export)
 
         num_lab = QLabel("编号")
-        num_lab.setStyleSheet("color:#c8ccd2; font-size:12px;")
+        num_lab.setObjectName("numberLabel")
         tools_row.addWidget(num_lab)
 
         self.num_toggle = LightToggleSwitch(checked=True)
@@ -377,7 +379,7 @@ class MainWindow(QMainWindow):
         self.canvas.grid_changed.connect(self._update_pixel_thumb)
         mv.addWidget(self.canvas, 1)
         help_row = QLabel("左键涂色 · 右键吸取 · 滚轮缩放 · 放大后移到边缘可平移 · Ctrl+Z 撤回")
-        help_row.setStyleSheet("color:#9aa0a6;")
+        help_row.setObjectName("muted")
         mv.addWidget(help_row)
         return mid
 
@@ -392,7 +394,7 @@ class MainWindow(QMainWindow):
         self.palette_panel.color_selected.connect(self.on_palette_selected)
         rv.addWidget(self.palette_panel, 1)
 
-        # 进度区 + 校准识别 + 开始/停止
+        # 进度区 + 开始/停止
         progress_box = QWidget()
         pv = QVBoxLayout(progress_box)
         pv.setContentsMargins(8, 0, 8, 0)
@@ -406,44 +408,54 @@ class MainWindow(QMainWindow):
         pv.addWidget(self.paint_progress)
 
         self.paint_detail = QLabel("就绪")
+        self.paint_detail.setObjectName("hint")
         self.paint_detail.setWordWrap(True)
-        self.paint_detail.setStyleSheet("color:#b0b4ba; font-size:12px;")
         pv.addWidget(self.paint_detail)
 
-        self.btn_prepare = QPushButton("校准并识别")
-        self.btn_prepare.setToolTip("依次：校准颜料/画布 → 识别游戏画面")
-        self.btn_prepare.setMinimumHeight(32)
-        self.btn_prepare.clicked.connect(self.prepare_screen)
-        pv.addWidget(self.btn_prepare)
-
         self.btn_paint = QPushButton("开始绘图")
+        self.btn_paint.setObjectName("primaryButton")
         self.btn_paint.setMinimumHeight(36)
-        self.btn_paint.setStyleSheet(
-            "QPushButton { font-weight:700; background:#3d6ea8; color:#fff; border-radius:4px; }"
-            "QPushButton:hover { background:#4a7fbc; }"
-            "QPushButton:disabled { background:#555; color:#aaa; }"
-        )
+        self.btn_paint.setToolTip("自动识别画布与颜料栏后开始绘制")
         self.btn_paint.clicked.connect(self.toggle_paint)
         pv.addWidget(self.btn_paint)
 
         rv.addWidget(progress_box, 0)
         return right
 
+    def _build_brand_header(self) -> QHBoxLayout:
+        row = QHBoxLayout()
+        row.setSpacing(8)
+        icon = QLabel()
+        icon.setFixedSize(48, 48)
+        pix = QPixmap(str(logo_path())) if logo_path().is_file() else QPixmap()
+        if not pix.isNull():
+            icon.setPixmap(
+                pix.scaled(
+                    48,
+                    48,
+                    Qt.AspectRatioMode.KeepAspectRatio,
+                    Qt.TransformationMode.FastTransformation,
+                )
+            )
+        else:
+            icon.setText("AP")
+            icon.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        row.addWidget(icon, 0, Qt.AlignmentFlag.AlignVCenter)
+        title_col = QVBoxLayout()
+        title_col.setSpacing(0)
+        brand = QLabel("ARK PAINT")
+        brand.setObjectName("brandTitle")
+        sub = QLabel("拼豆自动绘图")
+        sub.setObjectName("muted")
+        title_col.addWidget(brand)
+        title_col.addWidget(sub)
+        row.addLayout(title_col, 1)
+        return row
+
     def _section_title(self, text: str) -> QLabel:
         lab = QLabel(text)
-        lab.setStyleSheet("font-size:14px; font-weight:700; color:#f2f2f2; padding:4px 0;")
+        lab.setObjectName("sectionTitle")
         return lab
-
-    @staticmethod
-    def _tool_btn_style() -> str:
-        return (
-            "QPushButton {"
-            "  background:#e8eaed; color:#3a3f48; border:1px solid #c5c9d0;"
-            "  border-radius:4px; padding:4px 12px; font-size:12px;"
-            "}"
-            "QPushButton:hover { background:#f2f4f7; }"
-            "QPushButton:disabled { color:#9aa0a6; background:#dfe3e8; }"
-        )
 
     def _build_status(self) -> None:
         sb = QStatusBar()
@@ -525,7 +537,9 @@ class MainWindow(QMainWindow):
             Qt.AspectRatioMode.KeepAspectRatio,
             Qt.TransformationMode.FastTransformation,
         )
-        self.pixel_thumb.setStyleSheet(_PREVIEW_FILLED_STYLE)
+        self.pixel_thumb.setObjectName("previewFilled")
+        self.pixel_thumb.style().unpolish(self.pixel_thumb)
+        self.pixel_thumb.style().polish(self.pixel_thumb)
         self.pixel_thumb.setText("")
         self.pixel_thumb.setPixmap(scaled)
 
@@ -536,7 +550,9 @@ class MainWindow(QMainWindow):
     def _refresh_preview_display(self) -> None:
         if self._source_pixmap is None or self._source_pixmap.isNull():
             self.preview_label.setPixmap(QPixmap())
-            self.preview_label.setStyleSheet(_PREVIEW_EMPTY_STYLE)
+            self.preview_label.setObjectName("previewEmpty")
+            self.preview_label.style().unpolish(self.preview_label)
+            self.preview_label.style().polish(self.preview_label)
             self.preview_label.setText("拖入图片到此处\n或点击上方按钮")
             return
         target_w = max(120, self.preview_label.width() - 8)
@@ -547,9 +563,17 @@ class MainWindow(QMainWindow):
             Qt.AspectRatioMode.KeepAspectRatio,
             Qt.TransformationMode.SmoothTransformation,
         )
-        self.preview_label.setStyleSheet(_PREVIEW_FILLED_STYLE)
+        self.preview_label.setObjectName("previewFilled")
+        self.preview_label.style().unpolish(self.preview_label)
+        self.preview_label.style().polish(self.preview_label)
         self.preview_label.setText("")
         self.preview_label.setPixmap(scaled)
+
+    def _set_preview_from_pixmap(self, pix: QPixmap, name: str) -> None:
+        self._source_image_path = None
+        self._source_pixmap = None if pix.isNull() else QPixmap(pix)
+        self.preview_name.setText(name)
+        self._refresh_preview_display()
 
     def _set_preview_from_path(self, path: str) -> None:
         self._source_image_path = path
@@ -563,18 +587,43 @@ class MainWindow(QMainWindow):
         self.preview_name.setText(Path(path).name)
         self._refresh_preview_display()
 
-    def _apply_grid_from_path(self, path: str) -> None:
-        grid, _preview = image_to_grid(path, self.palette)
+    def _apply_cropped_pixmap(self, cropped: QPixmap, *, display_name: str) -> None:
+        """将正方形裁切图保存并转为 24×24 画布。"""
+        ensure_dirs()
+        out = DATA_DIR / "_last_crop.png"
+        if not cropped.save(str(out), "PNG"):
+            raise RuntimeError("裁切图保存失败")
+        grid, _preview = image_to_grid(str(out), self.palette)
         self.canvas.set_grid(grid)
-        self._set_preview_from_path(path)
+        self._source_image_path = str(out)
+        self._set_preview_from_pixmap(cropped, display_name)
+
+    def _crop_then_apply(self, pix: QPixmap, *, display_name: str) -> bool:
+        """正方形框选；确认则转化，取消返回 False。"""
+        if pix.isNull():
+            raise RuntimeError("图片为空")
+        cropped = crop_square_interactive(
+            pix,
+            self,
+            title="选择正方形转化区域",
+        )
+        if cropped is None:
+            return False
+        self._apply_cropped_pixmap(cropped, display_name=display_name)
+        return True
 
     def _load_image_path(self, path: str) -> None:
         try:
-            self._apply_grid_from_path(path)
+            pix = QPixmap(path)
+            if pix.isNull():
+                raise RuntimeError("无法读取图片")
+            if not self._crop_then_apply(pix, display_name=Path(path).name):
+                self.progress_label.setText("已取消框选")
+                return
         except Exception as exc:  # noqa: BLE001
             QMessageBox.warning(self, "导入失败", str(exc))
             return
-        self.progress_label.setText(f"已导入并转为 24×24：{Path(path).name}")
+        self.progress_label.setText(f"已框选并转为 24×24：{Path(path).name}")
 
     def import_image(self) -> None:
         path, _ = QFileDialog.getOpenFileName(
@@ -587,7 +636,7 @@ class MainWindow(QMainWindow):
             self._load_image_path(path)
 
     def capture_screen(self) -> None:
-        """隐藏本窗口后，让用户框选屏幕区域再转为像素图。"""
+        """隐藏本窗口后，让用户框选屏幕区域，再正方形裁切并转为像素图。"""
         self._was_maximized = self.isMaximized()
         self.hide()
         QApplication.processEvents()
@@ -615,22 +664,30 @@ class MainWindow(QMainWindow):
         self.activateWindow()
 
     def _on_region_captured(self, pix: QPixmap) -> None:
+        # 必须拷贝并延后处理：遮罩层在 emit 返回后才会 close()。
+        # 若此处同步弹出模态裁剪框，全屏遮罩会一直盖住界面导致“卡住”。
+        self._pending_capture_pix = QPixmap(pix)
+        QTimer.singleShot(0, self._finish_region_capture)
+
+    def _finish_region_capture(self) -> None:
+        pix = self._pending_capture_pix
+        self._pending_capture_pix = None
+        self._capture_overlay = None
+        self._restore_after_capture()
+        QApplication.processEvents()
         try:
-            if pix.isNull():
+            if pix is None or pix.isNull():
                 raise RuntimeError("截图为空")
-            ensure_dirs()
-            out = DATA_DIR / "_last_capture.png"
-            if not pix.save(str(out), "PNG"):
-                raise RuntimeError("截图保存失败")
-            self._apply_grid_from_path(str(out))
-            self.preview_name.setText("框选截图")
+            if not self._crop_then_apply(pix, display_name="框选截图"):
+                self.progress_label.setText("已取消正方形框选")
+                return
             self.progress_label.setText("已框选截图并转为 24×24")
         except Exception as exc:  # noqa: BLE001
             QMessageBox.warning(self, "截图失败", str(exc))
-        finally:
-            self._restore_after_capture()
 
     def _on_region_capture_cancelled(self) -> None:
+        self._pending_capture_pix = None
+        self._capture_overlay = None
         self.progress_label.setText("已取消截图")
         self._restore_after_capture()
 
@@ -725,14 +782,13 @@ class MainWindow(QMainWindow):
                 else:
                     status = f"已连接：{chosen.serial}"
                 self.device_label.setText(f"{status}\nADB：{self.adb.adb_path}")
-                self._needs_calib_before_paint = True
-                tip = f"连接成功 · {label or chosen.serial} · 打开拼豆页后点开始（将强制校准）"
+                tip = f"连接成功 · {label or chosen.serial} · 打开拼豆页后直接点开始绘图"
                 self.progress_label.setText(tip)
                 self._save_settings()
                 QMessageBox.information(
                     self,
                     "连接成功",
-                    f"{status}\n\n请打开游戏拼豆编辑页后再开始绘图。",
+                    f"{status}\n\n请打开游戏拼豆编辑页，然后直接点「开始绘图」。",
                 )
                 return
             except AdbError as exc:
@@ -747,67 +803,74 @@ class MainWindow(QMainWindow):
             f"最后错误：{last_err or '未知'}",
         )
 
+    def _apply_calibration(self, calib: CalibrationData, status: str = "校准已更新") -> None:
+        self.calib = calib
+        self._apply_sampled_palette()
+        self.palette_panel.set_palette(self.palette)
+        self.canvas.set_palette(self.palette)
+        self._update_pixel_thumb()
+        self.progress_label.setText(status)
+
     def open_calibrate(self) -> bool:
-        """打开校准对话框。成功保存返回 True。"""
+        """打开校准对话框（自动失败时的手动兜底）。成功保存返回 True。"""
         if not self.adb.is_ready():
             QMessageBox.information(self, "提示", "请先连接 ADB")
             return False
         dlg = CalibrateDialog(self.adb, self.calib, self)
         if dlg.exec():
-            self.calib = dlg.result_calibration()
-            self._apply_sampled_palette()
-            self.palette_panel.set_palette(self.palette)
-            self.canvas.set_palette(self.palette)
-            self._update_pixel_thumb()
-            self._needs_calib_before_paint = False
-            self.progress_label.setText("校准已更新")
+            self._apply_calibration(dlg.result_calibration())
             return True
         return False
 
-    def detect_screen(self, *, quiet: bool = False) -> bool:
-        """识别拼豆画面。成功返回 True。"""
+    def run_auto_calibrate(self, *, quiet: bool = False) -> bool:
+        """截图并全自动校准。成功写入 calibration.json 后返回 True。"""
         if not self.adb.is_ready():
             if not quiet:
                 QMessageBox.information(self, "提示", "请先连接 ADB")
             return False
         try:
-            from arkpaint.core.detector import detect_pindou_screen
-
             shot = self.adb.screencap()
-            result = detect_pindou_screen(shot, min_confidence=self.conf_spin.value())
         except AdbError as exc:
             if not quiet:
-                QMessageBox.warning(self, "识别失败", str(exc))
+                QMessageBox.warning(self, "截图失败", str(exc))
             return False
-        detail = f"置信度：{result.confidence:.3f}\n画布：{result.canvas_rect}"
-        if quiet and result.ok:
-            self.progress_label.setText(f"识别通过 · {result.message}")
-            self.paint_detail.setText(f"识别通过 · 置信度 {result.confidence:.3f}")
-            return True
-        icon = QMessageBox.Icon.Information if result.ok else QMessageBox.Icon.Warning
-        box = QMessageBox(self)
-        box.setIcon(icon)
-        box.setWindowTitle("画面识别")
-        box.setText(result.message)
-        box.setInformativeText(detail)
-        box.exec()
-        return bool(result.ok)
+        result = auto_calibrate(shot)
+        if not result.ok or result.calibration is None:
+            if not quiet:
+                QMessageBox.warning(
+                    self,
+                    "自动校准失败",
+                    f"{result.message}\n\n请确认已打开拼豆编辑页（色板默认在顶部即可）。",
+                )
+            return False
+        save_calibration(result.calibration)
+        self._apply_calibration(result.calibration, status="自动校准完成")
+        if not quiet:
+            QMessageBox.information(self, "自动校准", result.message)
+        else:
+            self.paint_detail.setText(result.message)
+        return True
 
-    def prepare_screen(self) -> bool:
-        """依次：校准颜料/画布 → 识别画面。"""
-        if not self.adb.is_ready():
-            QMessageBox.information(self, "提示", "请先连接 ADB")
+    def ensure_ready_to_paint(self) -> bool:
+        """开始绘制前静默自动校准；失败时可改用手动校准。"""
+        self.progress_label.setText("正在自动识别画布与颜料…")
+        self.paint_detail.setText("自动校准中…")
+        QApplication.processEvents()
+        if self.run_auto_calibrate(quiet=True):
+            return True
+        reply = QMessageBox.question(
+            self,
+            "自动识别未完成",
+            "未能自动识别画布或颜料栏。\n"
+            "请确认已打开拼豆编辑页。\n\n"
+            "是否改用手动校准？",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+            QMessageBox.StandardButton.Yes,
+        )
+        if reply != QMessageBox.StandardButton.Yes:
+            self.progress_label.setText("已取消")
             return False
-        self.progress_label.setText("步骤 1/2：校准颜料/画布…")
-        if not self.open_calibrate():
-            self.progress_label.setText("已取消校准")
-            return False
-        self.progress_label.setText("步骤 2/2：识别画面…")
-        ok = self.detect_screen(quiet=False)
-        if ok:
-            self.progress_label.setText("校准并识别完成，可以开始绘图")
-            self.paint_detail.setText("校准并识别完成")
-        return ok
+        return self.open_calibrate()
 
     def toggle_paint(self) -> None:
         if self._worker and self._worker.isRunning():
@@ -822,20 +885,8 @@ class MainWindow(QMainWindow):
             QMessageBox.information(self, "提示", "请先连接 ADB")
             return
 
-        # 每次 ADB 连接后的首次启动：强制校准+识别
-        if self._needs_calib_before_paint:
-            QMessageBox.information(
-                self,
-                "需要校准",
-                "本次连接后首次绘图，请先完成画布与颜料校准，并确认识别通过。\n"
-                "请确认游戏已打开拼豆编辑页，然后按提示操作。",
-            )
-            if not self.prepare_screen():
-                self.progress_label.setText("已取消准备，未开始绘制")
-                return
-
-        if not self.calib.is_palette_ready() or not self.calib.is_canvas_ready():
-            QMessageBox.information(self, "提示", "请先点击「校准并识别」")
+        if not self.ensure_ready_to_paint():
+            self.progress_label.setText("未开始绘制")
             return
 
         options = PaintOptions(
@@ -866,17 +917,12 @@ class MainWindow(QMainWindow):
     def _set_paint_running(self, running: bool) -> None:
         if running:
             self.btn_paint.setText("停止")
-            self.btn_paint.setStyleSheet(
-                "QPushButton { font-weight:700; background:#a85a3d; color:#fff; border-radius:4px; }"
-                "QPushButton:hover { background:#bc6a4a; }"
-            )
+            self.btn_paint.setObjectName("dangerButton")
         else:
             self.btn_paint.setText("开始绘图")
-            self.btn_paint.setStyleSheet(
-                "QPushButton { font-weight:700; background:#3d6ea8; color:#fff; border-radius:4px; }"
-                "QPushButton:hover { background:#4a7fbc; }"
-                "QPushButton:disabled { background:#555; color:#aaa; }"
-            )
+            self.btn_paint.setObjectName("primaryButton")
+        self.btn_paint.style().unpolish(self.btn_paint)
+        self.btn_paint.style().polish(self.btn_paint)
 
     def _on_progress(self, info: object) -> None:
         if not isinstance(info, PaintProgress):

@@ -3,8 +3,22 @@
 from __future__ import annotations
 
 from PySide6.QtCore import QPointF, QRectF, Qt, Signal
-from PySide6.QtGui import QColor, QPainter, QPainterPath, QRadialGradient
-from PySide6.QtWidgets import QWidget
+from PySide6.QtGui import QColor, QPainter, QPainterPath, QRadialGradient, QWheelEvent
+from PySide6.QtWidgets import QDoubleSpinBox, QSpinBox, QWidget
+
+
+class NoWheelSpinBox(QSpinBox):
+    """数值框：忽略滚轮，避免误调端口等参数。"""
+
+    def wheelEvent(self, event: QWheelEvent) -> None:
+        event.ignore()
+
+
+class NoWheelDoubleSpinBox(QDoubleSpinBox):
+    """浮点数值框：忽略滚轮。"""
+
+    def wheelEvent(self, event: QWheelEvent) -> None:
+        event.ignore()
 
 
 class LightToggleSwitch(QWidget):
@@ -42,9 +56,8 @@ class LightToggleSwitch(QWidget):
         track = QRectF(1.5, 3.5, self.width() - 3, self.height() - 7)
         radius = track.height() / 2
 
-        # 浅色主题：开=柔和蓝，关=浅灰
         if self._checked:
-            track_color = QColor(155, 186, 230)  # soft blue
+            track_color = QColor(155, 186, 230)
             border = QColor(130, 165, 215)
         else:
             track_color = QColor(220, 224, 230)
@@ -56,7 +69,6 @@ class LightToggleSwitch(QWidget):
         p.setPen(border)
         p.drawPath(path)
 
-        # 圆形滑块（偏白，带轻微阴影感）
         margin = 3.0
         thumb_d = track.height() - margin * 2
         if self._checked:
@@ -66,7 +78,6 @@ class LightToggleSwitch(QWidget):
         cy = track.center().y()
         thumb = QRectF(cx - thumb_d / 2, cy - thumb_d / 2, thumb_d, thumb_d)
 
-        # 轻阴影
         shadow = QRectF(thumb).translated(0.6, 0.8)
         p.setPen(Qt.PenStyle.NoPen)
         p.setBrush(QColor(80, 90, 110, 45))

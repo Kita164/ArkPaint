@@ -1,4 +1,4 @@
-"""手动校准：画布四角、颜料栏位置与滑动。"""
+"""校准：优先一键自动识别；必要时可手动点选画布/颜料。"""
 
 from __future__ import annotations
 
@@ -21,8 +21,10 @@ from PySide6.QtWidgets import (
 )
 
 from arkpaint.core.adb import AdbController, AdbError
+from arkpaint.core.auto_calibrate import auto_calibrate
 from arkpaint.core.calibration import CalibrationData, save_calibration
 from arkpaint.core.detector import detect_canvas_region
+from arkpaint.ui.theme import app_icon
 
 
 class CalibStep(Enum):
@@ -123,6 +125,7 @@ class CalibrateDialog(QDialog):
     def __init__(self, adb: AdbController, calib: CalibrationData, parent=None) -> None:
         super().__init__(parent)
         self.setWindowTitle("校准 · 画布与颜料栏")
+        self.setWindowIcon(app_icon())
         self.resize(980, 640)
         self.adb = adb
         self.calib = CalibrationData.from_dict(calib.to_dict())
@@ -131,7 +134,10 @@ class CalibrateDialog(QDialog):
 
         root = QVBoxLayout(self)
         self.hint = QLabel(STEP_HINTS[self.step])
-        self.hint.setStyleSheet("font-size:14px; font-weight:600; color:#e8e8e8; padding:6px;")
+        self.hint.setStyleSheet(
+            "font-size:13px; font-weight:700; color:#5EC8C0; padding:6px;"
+            "border-bottom:2px solid #2A82F4;"
+        )
         root.addWidget(self.hint)
 
         self.view = _ShotView()
@@ -159,21 +165,34 @@ class CalibrateDialog(QDialog):
 
         btns = QHBoxLayout()
         self.btn_shot = QPushButton("刷新截图")
-        self.btn_auto = QPushButton("自动检测画布")
+        self.btn_auto_all = QPushButton("一键自动校准")
+        self.btn_auto_all.setObjectName("primaryButton")
+        self.btn_auto_all.setToolTip("识别中央画布与右侧 4 列颜料栏（分辨率自适应）")
+        self.btn_auto = QPushButton("仅检测画布")
         self.btn_restart = QPushButton("重新开始")
         self.btn_save = QPushButton("保存校准")
         self.btn_close = QPushButton("关闭")
-        for b in (self.btn_shot, self.btn_auto, self.btn_restart, self.btn_save, self.btn_close):
+        for b in (
+            self.btn_shot,
+            self.btn_auto_all,
+            self.btn_auto,
+            self.btn_restart,
+            self.btn_save,
+            self.btn_close,
+        ):
             btns.addWidget(b)
         root.addLayout(btns)
 
         self.btn_shot.clicked.connect(self.refresh_shot)
+        self.btn_auto_all.clicked.connect(lambda: self.run_auto_calibrate(False))
         self.btn_auto.clicked.connect(self.auto_canvas)
         self.btn_restart.clicked.connect(self.restart)
         self.btn_save.clicked.connect(self.save)
         self.btn_close.clicked.connect(self.reject)
 
         self.refresh_shot()
+        # 打开即尝试自动校准，失败则保留手动步骤提示
+        self.run_auto_calibrate(silent_if_fail=True)
 
     def refresh_shot(self) -> None:
         try:
@@ -183,6 +202,45 @@ class CalibrateDialog(QDialog):
             return
         self.view.set_image(img)
         self._redraw_marks()
+
+    def run_auto_calibrate(self, silent_if_fail: bool = False) -> bool:
+        """全自动识别画布+颜料+滑动。成功返回 True。"""
+        if self.view._bgr is None:
+            self.refresh_shot()
+        if self.view._bgr is None:
+            if not silent_if_fail:
+                QMessageBox.warning(self, "自动校准", "没有可用截图")
+            return False
+        result = auto_calibrate(
+            self.view._bgr,
+            total_colors=self.spin_total.value(),
+            columns=self.spin_cols.value(),
+            rows_per_scroll=self.spin_rps.value(),
+        )
+        if not result.ok or result.calibration is None:
+            if not silent_if_fail:
+                QMessageBox.warning(
+                    self,
+                    "自动校准失败",
+                    f"{result.message}\n\n请确认色板滚到顶部，或改用手动点选。",
+                )
+            return False
+
+        self.calib = result.calibration
+        self.spin_visible.setValue(self.calib.visible_rows)
+        self.spin_total.setValue(self.calib.total_colors)
+        self.spin_cols.setValue(self.calib.palette_columns)
+        self.spin_rps.setValue(self.calib.rows_per_scroll)
+        self.step = CalibStep.DONE
+        self.hint.setText(f"自动校准完成 — {result.message}")
+        self._redraw_marks()
+        if not silent_if_fail:
+            QMessageBox.information(
+                self,
+                "自动校准",
+                f"{result.message}\n\n请核对截图上的标记，确认后点「保存校准」。",
+            )
+        return True
 
     def auto_canvas(self) -> None:
         if self.view._bgr is None:
@@ -214,7 +272,12 @@ class CalibrateDialog(QDialog):
         if self.calib.canvas_br:
             self.view.add_mark(*self.calib.canvas_br, "画布BR")
         if self.calib.palette_origin:
-            self.view.add_mark(*self.calib.palette_origin, "色1")
+            ox, oy = self.calib.palette_origin
+            self.view.add_mark(ox, oy, "色1")
+            if self.calib.palette_dx > 0:
+                self.view.add_mark(int(ox + self.calib.palette_dx), oy, "色2")
+            if self.calib.palette_dy > 0:
+                self.view.add_mark(ox, int(oy + self.calib.palette_dy), "色5")
         if self.calib.scroll_from:
             self.view.add_mark(*self.calib.scroll_from, "滑起")
         if self.calib.scroll_to:
