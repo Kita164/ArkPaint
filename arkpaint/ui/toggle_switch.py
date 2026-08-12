@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from PySide6.QtCore import QPointF, QRectF, Qt, Signal
 from PySide6.QtGui import QColor, QPainter, QPainterPath, QRadialGradient, QWheelEvent
-from PySide6.QtWidgets import QDoubleSpinBox, QSpinBox, QWidget
+from PySide6.QtWidgets import QComboBox, QDoubleSpinBox, QSpinBox, QWidget
 
 
 class NoWheelSpinBox(QSpinBox):
@@ -16,6 +16,13 @@ class NoWheelSpinBox(QSpinBox):
 
 class NoWheelDoubleSpinBox(QDoubleSpinBox):
     """浮点数值框：忽略滚轮。"""
+
+    def wheelEvent(self, event: QWheelEvent) -> None:
+        event.ignore()
+
+
+class NoWheelComboBox(QComboBox):
+    """下拉框：忽略滚轮，避免误切转换算法等。"""
 
     def wheelEvent(self, event: QWheelEvent) -> None:
         event.ignore()

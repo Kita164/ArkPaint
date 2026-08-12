@@ -38,6 +38,7 @@ from arkpaint.config import (
     MUMU_ADB_BASE_PORT,
     MUMU_ADB_PORT_STEP,
     MUMU_ADB_SCAN_INSTANCES,
+    SCRATCH_DIR,
     SETTINGS_PATH,
     ensure_dirs,
     load_json,
@@ -45,16 +46,30 @@ from arkpaint.config import (
 )
 from arkpaint.core.adb import AdbController, AdbError
 from arkpaint.core.auto_calibrate import auto_calibrate
+from arkpaint.core.diagnose import run_diagnose
 from arkpaint.core.calibration import CalibrationData, load_calibration, save_calibration
-from arkpaint.core.image_processor import blank_grid, image_to_grid
+from arkpaint.core.image_processor import (
+    DEFAULT_PIXEL_ALGORITHM,
+    PIXEL_ALGORITHMS,
+    algorithm_label,
+    blank_grid,
+    image_to_grid,
+    normalize_algorithm,
+)
 from arkpaint.core.painter import AutoPainter, PaintOptions, PaintProgress
 from arkpaint.core.palette import DEFAULT_PALETTE, PaletteColor, find_white_index, rebuild_palette
-from arkpaint.paths import find_adb, mumu_instance_label
+from arkpaint.paths import default_adb_path, find_adb, mumu_instance_label
 from arkpaint.ui.calibrate_dialog import CalibrateDialog
+from arkpaint.ui.diagnose_dialog import show_diagnose_report
 from arkpaint.ui.canvas_widget import PixelCanvas
 from arkpaint.ui.palette_widget import PalettePanel
 from arkpaint.ui.square_crop_dialog import crop_square_interactive
-from arkpaint.ui.toggle_switch import LightToggleSwitch, NoWheelDoubleSpinBox, NoWheelSpinBox
+from arkpaint.ui.toggle_switch import (
+    LightToggleSwitch,
+    NoWheelComboBox,
+    NoWheelDoubleSpinBox,
+    NoWheelSpinBox,
+)
 
 _IMAGE_SUFFIXES = {".png", ".jpg", ".jpeg", ".bmp", ".webp", ".gif"}
 
@@ -154,6 +169,7 @@ class MainWindow(QMainWindow):
         self._was_maximized = False
         self._pending_capture_pix: QPixmap | None = None
         self._capture_overlay = None
+        self._last_crop_path: str | None = None
 
         self._build_ui()
         self._build_status()
@@ -226,6 +242,23 @@ class MainWindow(QMainWindow):
         import_row.addWidget(self.btn_capture)
         lv.addLayout(import_row)
 
+        lv.addWidget(QLabel("转换算法（仅游戏 40 色）"))
+        self.algo_combo = NoWheelComboBox()
+        self.algo_combo.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
+        for aid, name, hint in PIXEL_ALGORITHMS:
+            self.algo_combo.addItem(name, aid)
+            self.algo_combo.setItemData(
+                self.algo_combo.count() - 1,
+                hint,
+                Qt.ItemDataRole.ToolTipRole,
+            )
+        self.algo_combo.setToolTip(
+            "\n".join(f"· {name}：{hint}" for _aid, name, hint in PIXEL_ALGORITHMS)
+            + "\n切换后若已有框选图，会按新算法重转（Ctrl+Z 可撤回）。"
+        )
+        self.algo_combo.currentIndexChanged.connect(self._on_algorithm_changed)
+        lv.addWidget(self.algo_combo)
+
         self.preview_label = ImagePreviewLabel()
         self.preview_label.setObjectName("previewEmpty")
         self.preview_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
@@ -277,7 +310,8 @@ class MainWindow(QMainWindow):
         lv.addWidget(QLabel("adb.exe 路径"))
         adb_row = QHBoxLayout()
         self.adb_path_edit = QLineEdit()
-        self.adb_path_edit.setPlaceholderText(r"~\Netease\MuMuPlayer-12.0\shell\adb.exe")
+        self.adb_path_edit.setPlaceholderText(str(default_adb_path()))
+        self.adb_path_edit.setToolTip("默认使用本程序 tools\\adb.exe，一般无需改成 MuMu 的 adb")
         btn_browse_adb = QPushButton("…")
         btn_browse_adb.setFixedWidth(32)
         btn_browse_adb.setToolTip("浏览选择 adb.exe")
@@ -313,16 +347,25 @@ class MainWindow(QMainWindow):
         self.delay_spin.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
         self.skip_white = QCheckBox("跳过白色格子（少点）")
         self.skip_white.setChecked(True)
+        self.debug_mode = QCheckBox("调试模式")
+        self.debug_mode.setToolTip(
+            "失败时保存模拟器截图、白块蒙版与识别步骤到 data/debug，便于查看卡在哪一步"
+        )
+        self.btn_diagnose = QPushButton("诊断识别")
+        self.btn_diagnose.setToolTip("立即截图并逐步检查：ADB → 画面 → 画布 → 色板")
+        self.btn_diagnose.clicked.connect(self.run_diagnose)
         lv.addWidget(QLabel("识别置信度阈值"))
         lv.addWidget(self.conf_spin)
         lv.addWidget(QLabel("点击间隔 ms"))
         lv.addWidget(self.delay_spin)
         lv.addWidget(self.skip_white)
+        lv.addWidget(self.debug_mode)
+        lv.addWidget(self.btn_diagnose)
 
         lv.addSpacing(8)
         tip = QLabel(
             "使用说明：\n"
-            "1. 导入/拖入/截图 → 拖动正方形框选区域 → 转为 24×24\n"
+            "1. 导入/拖入/截图 → 选转换算法 → 拖动正方形框选区域 → 转为 24×24\n"
             "2. 连接 MuMu ADB\n"
             "3. 打开游戏拼豆编辑页（色板默认在顶部）\n"
             "4. 点「开始绘图」即可（自动识别画布与色板）"
@@ -463,6 +506,25 @@ class MainWindow(QMainWindow):
         self.progress_label = QLabel("就绪")
         sb.addWidget(self.progress_label, 1)
 
+    def _current_algorithm(self) -> str:
+        data = self.algo_combo.currentData()
+        return normalize_algorithm(str(data) if data else None)
+
+    def _set_algorithm_combo(self, algorithm: str) -> None:
+        alg = normalize_algorithm(algorithm)
+        idx = self.algo_combo.findData(alg)
+        if idx < 0:
+            idx = self.algo_combo.findData(DEFAULT_PIXEL_ALGORITHM)
+        self.algo_combo.blockSignals(True)
+        self.algo_combo.setCurrentIndex(max(0, idx))
+        self.algo_combo.blockSignals(False)
+
+    def _on_algorithm_changed(self, _index: int = 0) -> None:
+        self._save_settings()
+        if self._reconvert_last_crop(push_undo=True):
+            name = algorithm_label(self._current_algorithm())
+            self.progress_label.setText(f"已用「{name}」重新转换（Ctrl+Z 可撤回）")
+
     def _load_settings_to_ui(self) -> None:
         self.host_edit.setText(str(self._settings.get("adb_host", DEFAULT_ADB_HOST)))
         self.port_spin.setValue(int(self._settings.get("adb_port", DEFAULT_ADB_PORT)))
@@ -471,6 +533,10 @@ class MainWindow(QMainWindow):
         saved_adb = str(self._settings.get("adb_path", "") or "")
         if saved_adb:
             self.adb_path_edit.setText(saved_adb)
+        else:
+            self.adb_path_edit.setText(str(default_adb_path()))
+        self._set_algorithm_combo(str(self._settings.get("pixel_algorithm", DEFAULT_PIXEL_ALGORITHM)))
+        self.debug_mode.setChecked(bool(self._settings.get("debug_mode", False)))
 
     def _save_settings(self) -> None:
         save_json(
@@ -481,6 +547,8 @@ class MainWindow(QMainWindow):
                 "adb_path": self.adb_path_edit.text().strip(),
                 "confidence": self.conf_spin.value(),
                 "tap_delay": self.delay_spin.value(),
+                "pixel_algorithm": self._current_algorithm(),
+                "debug_mode": self.debug_mode.isChecked(),
             },
         )
 
@@ -587,15 +655,28 @@ class MainWindow(QMainWindow):
         self.preview_name.setText(Path(path).name)
         self._refresh_preview_display()
 
+    def _reconvert_last_crop(self, *, push_undo: bool = False) -> bool:
+        """用当前算法把上次框选图再转一遍。成功返回 True。"""
+        path = self._last_crop_path
+        if not path or not Path(path).is_file():
+            return False
+        grid, _preview = image_to_grid(
+            path,
+            self.palette,
+            algorithm=self._current_algorithm(),
+        )
+        self.canvas.set_grid(grid, push_undo=push_undo)
+        return True
+
     def _apply_cropped_pixmap(self, cropped: QPixmap, *, display_name: str) -> None:
         """将正方形裁切图保存并转为 24×24 画布。"""
         ensure_dirs()
-        out = DATA_DIR / "_last_crop.png"
+        out = SCRATCH_DIR / "_last_crop.png"
         if not cropped.save(str(out), "PNG"):
             raise RuntimeError("裁切图保存失败")
-        grid, _preview = image_to_grid(str(out), self.palette)
-        self.canvas.set_grid(grid)
+        self._last_crop_path = str(out)
         self._source_image_path = str(out)
+        self._reconvert_last_crop(push_undo=False)
         self._set_preview_from_pixmap(cropped, display_name)
 
     def _crop_then_apply(self, pix: QPixmap, *, display_name: str) -> bool:
@@ -692,10 +773,13 @@ class MainWindow(QMainWindow):
         self._restore_after_capture()
 
     def browse_adb(self) -> None:
+        start = default_adb_path().parent
+        if not start.is_dir():
+            start = Path.home()
         path, _ = QFileDialog.getOpenFileName(
             self,
             "选择 adb.exe",
-            str(Path.home()),
+            str(start),
             "Executable (adb.exe);;All (*.*)",
         )
         if path:
@@ -709,12 +793,19 @@ class MainWindow(QMainWindow):
         resolved = Path(found)
         ok = resolved.exists() or found == "adb"
         if resolved.exists():
-            self.adb_path_edit.setText(str(resolved))
             self.adb.adb_path = str(resolved)
+            typed = Path(preferred).expanduser() if preferred else None
+            # 静默检测：输入框已是默认自带路径但文件尚不存在时，不要改成 MuMu 的 adb
+            replace_field = True
+            if silent and typed is not None and not typed.is_file():
+                replace_field = False
+            if replace_field:
+                self.adb_path_edit.setText(str(resolved))
             if not silent:
                 self.progress_label.setText(f"已检测到 ADB：{resolved}")
                 QMessageBox.information(self, "ADB", f"已找到：\n{resolved}")
-            self._save_settings()
+            if replace_field:
+                self._save_settings()
             return str(resolved)
         # PATH 中的 adb
         if found == "adb":
@@ -727,7 +818,8 @@ class MainWindow(QMainWindow):
                 self,
                 "ADB",
                 "未找到 adb.exe。\n"
-                "可手动选择，常见路径：\n"
+                f"默认请使用本程序自带：\n{default_adb_path()}\n\n"
+                "也可手动选择 MuMu 的 adb：\n"
                 r"%USERPROFILE%\Netease\MuMuPlayer-12.0\shell\adb.exe",
             )
         return None if not ok else found
@@ -822,6 +914,28 @@ class MainWindow(QMainWindow):
             return True
         return False
 
+    def run_diagnose(self) -> None:
+        """手动跑一遍识别诊断并弹出步骤报告。"""
+        if not self.adb.is_ready():
+            QMessageBox.information(self, "提示", "请先连接 ADB")
+            return
+        self.progress_label.setText("正在诊断识别…")
+        self.paint_detail.setText("诊断中…")
+        QApplication.processEvents()
+        try:
+            report = run_diagnose(self.adb, min_confidence=self.conf_spin.value())
+        except Exception as exc:  # noqa: BLE001
+            QMessageBox.warning(self, "诊断失败", str(exc))
+            self.progress_label.setText("诊断失败")
+            return
+        if report.ok and report.calibration is not None:
+            save_calibration(report.calibration)
+            self._apply_calibration(report.calibration, status="诊断通过，校准已更新")
+        else:
+            self.progress_label.setText("诊断未通过")
+            self.paint_detail.setText(report.summary)
+        show_diagnose_report(self, report)
+
     def run_auto_calibrate(self, *, quiet: bool = False) -> bool:
         """截图并全自动校准。成功写入 calibration.json 后返回 True。"""
         if not self.adb.is_ready():
@@ -858,11 +972,18 @@ class MainWindow(QMainWindow):
         QApplication.processEvents()
         if self.run_auto_calibrate(quiet=True):
             return True
+        if self.debug_mode.isChecked():
+            try:
+                report = run_diagnose(self.adb, min_confidence=self.conf_spin.value())
+                show_diagnose_report(self, report, extra="开始绘图前自动识别失败。")
+            except Exception:  # noqa: BLE001
+                pass
         reply = QMessageBox.question(
             self,
             "自动识别未完成",
             "未能自动识别画布或颜料栏。\n"
             "请确认已打开拼豆编辑页。\n\n"
+            "可点「诊断识别」查看截图与步骤。\n"
             "是否改用手动校准？",
             QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
             QMessageBox.StandardButton.Yes,
@@ -958,7 +1079,18 @@ class MainWindow(QMainWindow):
     def _on_paint_failed(self, message: str) -> None:
         self.paint_detail.setText("绘制失败")
         self.progress_label.setText("绘制失败")
-        QMessageBox.warning(self, "绘制失败", message)
+        if self.debug_mode.isChecked():
+            try:
+                report = run_diagnose(self.adb, min_confidence=self.conf_spin.value())
+                show_diagnose_report(self, report, extra=f"绘制失败：{message}")
+                return
+            except Exception:  # noqa: BLE001
+                pass
+        QMessageBox.warning(
+            self,
+            "绘制失败",
+            f"{message}\n\n可勾选「调试模式」或点「诊断识别」，查看模拟器截图与卡住的步骤。",
+        )
 
     def resizeEvent(self, event) -> None:
         super().resizeEvent(event)

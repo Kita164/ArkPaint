@@ -15,7 +15,7 @@ import numpy as np
 
 from arkpaint.config import GRID_SIZE, PALETTE_COLUMNS
 from arkpaint.core.calibration import CalibrationData
-from arkpaint.core.detector import detect_canvas_region
+from arkpaint.core.detector import detect_canvas, detect_ui_panel_bounds
 
 
 @dataclass
@@ -27,74 +27,19 @@ class AutoCalibrateResult:
     palette_cells: int = 0
 
 
-def _refine_canvas_rect(
-    bgr: np.ndarray, rect: tuple[int, int, int, int]
-) -> tuple[int, int, int, int]:
-    """在粗定位的白块内，用边缘投影收紧到网格外缘。"""
-    x, y, w, h = rect
-    pad = max(2, min(w, h) // 80)
-    x0 = max(0, x - pad)
-    y0 = max(0, y - pad)
-    x1 = min(bgr.shape[1], x + w + pad)
-    y1 = min(bgr.shape[0], y + h + pad)
-    roi = bgr[y0:y1, x0:x1]
-    if roi.size == 0:
-        return rect
-
-    gray = cv2.cvtColor(roi, cv2.COLOR_BGR2GRAY)
-    _, mask = cv2.threshold(gray, 200, 255, cv2.THRESH_BINARY)
-    # 去掉细网格线空洞，保留整块白板
-    k = max(3, min(roi.shape[0], roi.shape[1]) // 60)
-    if k % 2 == 0:
-        k += 1
-    kernel = np.ones((k, k), np.uint8)
-    mask = cv2.morphologyEx(mask, cv2.MORPH_CLOSE, kernel, iterations=2)
-
-    ys, xs = np.where(mask > 0)
-    if len(xs) < 100:
-        return rect
-    rx0, rx1 = int(xs.min()), int(xs.max()) + 1
-    ry0, ry1 = int(ys.min()), int(ys.max()) + 1
-    rw, rh = rx1 - rx0, ry1 - ry0
-    if rw < 80 or rh < 80:
-        return rect
-    ratio = rw / float(rh)
-    if ratio < 0.85 or ratio > 1.15:
-        return rect
-    return (x0 + rx0, y0 + ry0, rw, rh)
-
-
-def detect_canvas(bgr: np.ndarray) -> tuple[int, int, int, int] | None:
-    """定位中央画布，返回 (x, y, w, h)。"""
-    rough = detect_canvas_region(bgr)
-    if rough is None:
-        # 限制在画面中部再试一次，避开左右面板误检
-        h, w = bgr.shape[:2]
-        x0, x1 = int(w * 0.18), int(w * 0.72)
-        cropped = bgr[:, x0:x1]
-        rough = detect_canvas_region(cropped)
-        if rough is None:
-            return None
-        rx, ry, rw, rh = rough
-        rough = (rx + x0, ry, rw, rh)
-    return _refine_canvas_rect(bgr, rough)
-
-
 def _palette_roi_bounds(
     bgr: np.ndarray, canvas: tuple[int, int, int, int]
 ) -> tuple[int, int, int, int]:
-    """画布右侧的颜料栏 ROI（全图像素坐标）。"""
+    """颜料栏 ROI：优先右侧面板 + 与采样脚本一致的比例。"""
     h, w = bgr.shape[:2]
-    cx, cy, cw, ch = canvas
-    # 色板在画布右侧；纵向大致覆盖画布高度并略向下延伸
-    x0 = min(w - 10, cx + cw + max(8, cw // 40))
-    x1 = min(w, max(x0 + 40, int(w * 0.96)))
-    # 「颜料」标题下方起，避免顶栏按钮
-    y0 = max(0, int(cy + ch * 0.02))
-    y0 = max(y0, int(h * 0.28))
-    y1 = min(h, max(y0 + 80, int(cy + ch * 0.98), int(h * 0.94)))
+    _cx, _cy, cw, _ch = canvas
+    _left, right_panel = detect_ui_panel_bounds(bgr)
+    # 与 tools/sample_palette_from_shots.py 一致，适配 1-24 / 16-40 截图
+    x0 = max(int(w * 0.68), _left + cw + max(8, cw // 40))
+    x1 = min(w, max(x0 + 80, int(w * 0.905), right_panel - 4))
+    y0 = int(h * 0.355)
+    y1 = int(h * 0.92)
     if x1 - x0 < 40 or y1 - y0 < 80:
-        # 回退到比例裁剪（与历史采样脚本一致）
         x0, x1 = int(w * 0.68), int(w * 0.92)
         y0, y1 = int(h * 0.34), int(h * 0.94)
     return x0, y0, x1, y1

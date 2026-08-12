@@ -60,7 +60,16 @@ class PixelCanvas(QWidget):
         self._palette = list(palette)
         self.update()
 
-    def set_grid(self, grid: np.ndarray, *, clear_history: bool = True) -> None:
+    def set_grid(
+        self,
+        grid: np.ndarray,
+        *,
+        clear_history: bool = True,
+        push_undo: bool = False,
+    ) -> None:
+        if push_undo:
+            self._push_undo()
+            clear_history = False
         self._grid = np.array(grid, dtype=np.int32, copy=True)
         if clear_history:
             self._undo_stack.clear()

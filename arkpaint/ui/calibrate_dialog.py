@@ -23,7 +23,7 @@ from PySide6.QtWidgets import (
 from arkpaint.core.adb import AdbController, AdbError
 from arkpaint.core.auto_calibrate import auto_calibrate
 from arkpaint.core.calibration import CalibrationData, save_calibration
-from arkpaint.core.detector import detect_canvas_region
+from arkpaint.core.detector import detect_canvas
 from arkpaint.ui.theme import app_icon
 
 
@@ -245,7 +245,7 @@ class CalibrateDialog(QDialog):
     def auto_canvas(self) -> None:
         if self.view._bgr is None:
             return
-        rect = detect_canvas_region(self.view._bgr)
+        rect = detect_canvas(self.view._bgr)
         if not rect:
             QMessageBox.information(self, "提示", "未能自动找到画布，请手动点选两角")
             return

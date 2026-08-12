@@ -200,7 +200,7 @@ QPushButton#toolButton:disabled {{
 }}
 
 /* —— 输入 —— */
-QLineEdit, QSpinBox, QDoubleSpinBox {{
+QLineEdit, QSpinBox, QDoubleSpinBox, QComboBox {{
     background-color: {CHARCOAL};
     color: {TEXT};
     border: 2px solid {BORDER};
@@ -208,8 +208,20 @@ QLineEdit, QSpinBox, QDoubleSpinBox {{
     padding: 4px 6px;
     selection-background-color: {BLUE};
 }}
-QLineEdit:focus, QSpinBox:focus, QDoubleSpinBox:focus {{
+QLineEdit:focus, QSpinBox:focus, QDoubleSpinBox:focus, QComboBox:focus {{
     border-color: {TEAL};
+}}
+QComboBox::drop-down {{
+    border: none;
+    width: 20px;
+}}
+QComboBox QAbstractItemView {{
+    background-color: {CHARCOAL};
+    color: {TEXT};
+    border: 2px solid {BORDER};
+    selection-background-color: {BLUE};
+    selection-color: #ffffff;
+    outline: none;
 }}
 QSpinBox::up-button, QSpinBox::down-button,
 QDoubleSpinBox::up-button, QDoubleSpinBox::down-button {{

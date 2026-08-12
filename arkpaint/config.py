@@ -30,14 +30,18 @@ ROOT_DIR = app_base_dir()
 ASSETS_DIR = resource_dir() / "assets"
 # 校准/设置写到 exe 旁，避免打包只读目录
 DATA_DIR = ROOT_DIR / "data"
+SCRATCH_DIR = DATA_DIR / "scratch"
 CALIBRATION_PATH = DATA_DIR / "calibration.json"
 SETTINGS_PATH = DATA_DIR / "settings.json"
+DEBUG_DIR = DATA_DIR / "debug"
+DETECT_TEST_DIR = DATA_DIR / "detect_test"
 REFERENCE_IMAGE = ASSETS_DIR / "reference.png"
 LOGO_PATH = ASSETS_DIR / "logo" / "ArkPaint.png"
 
 
 def ensure_dirs() -> None:
     DATA_DIR.mkdir(parents=True, exist_ok=True)
+    SCRATCH_DIR.mkdir(parents=True, exist_ok=True)
     # 开发态可写 assets；打包态 assets 在只读资源里
     writable_assets = ROOT_DIR / "assets"
     writable_assets.mkdir(parents=True, exist_ok=True)

@@ -9,6 +9,7 @@ import cv2
 import numpy as np
 
 DATA = Path(__file__).resolve().parents[1] / "data"
+SCRATCH = DATA / "scratch"
 COLS, ROWS = 4, 6
 
 
@@ -91,7 +92,8 @@ def process(
     x0, x1 = int(w * 0.68), int(w * 0.905)
     y0, y1 = int(h * y0_frac), int(h * 0.92)
     roi = bgr[y0:y1, x0:x1]
-    cv2.imwrite(str(DATA / f"_roi_{path.stem}.png"), roi)
+    SCRATCH.mkdir(parents=True, exist_ok=True)
+    cv2.imwrite(str(SCRATCH / f"_roi_{path.stem}.png"), roi)
 
     cells = detect_cells(roi)
     print(f"{path.name}: detected {len(cells)} cells")
@@ -115,13 +117,13 @@ def process(
         y = int(round(oy + row * dy))
         cv2.circle(vis, (x, y), 8, (0, 255, 255), 2)
         cv2.putText(vis, str(i + 1), (x - 10, y - 12), cv2.FONT_HERSHEY_SIMPLEX, 0.45, (0, 255, 255), 1)
-    cv2.imwrite(str(DATA / f"_marked_{path.stem}.png"), vis[:, x0:x1])
+    cv2.imwrite(str(SCRATCH / f"_marked_{path.stem}.png"), vis[:, x0:x1])
 
     strip = np.zeros((90, 52 * len(colors), 3), np.uint8)
     for i, (r, g, b) in enumerate(colors):
         strip[:, i * 52 : (i + 1) * 52] = (b, g, r)
         cv2.putText(strip, str(i + 1), (i * 52 + 8, 78), cv2.FONT_HERSHEY_SIMPLEX, 0.45, (255, 255, 255), 1)
-    cv2.imwrite(str(DATA / f"_strip_{path.stem}.png"), strip)
+    cv2.imwrite(str(SCRATCH / f"_strip_{path.stem}.png"), strip)
 
     for i, c in enumerate(colors, 1):
         print(f"  {i:2d} #{c[0]:02x}{c[1]:02x}{c[2]:02x} {c}")
@@ -160,7 +162,7 @@ def main():
     for i, (r, g, b) in enumerate(merged):
         strip[:, i * 52 : (i + 1) * 52] = (b, g, r)
         cv2.putText(strip, str(i + 1), (i * 52 + 6, 78), cv2.FONT_HERSHEY_SIMPLEX, 0.4, (255, 255, 255), 1)
-    cv2.imwrite(str(DATA / "_strip_merged.png"), strip)
+    cv2.imwrite(str(SCRATCH / "_strip_merged.png"), strip)
 
     print(f"=== MERGED {len(merged)} ===")
     for i, c in enumerate(merged, 1):

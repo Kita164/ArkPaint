@@ -25,8 +25,35 @@ def resource_dir() -> Path:
     return Path(__file__).resolve().parent.parent
 
 
+def default_adb_path() -> Path:
+    """默认 adb：项目根 / exe 旁的 tools/adb.exe。"""
+    return app_base_dir() / "tools" / "adb.exe"
+
+
+def bundled_adb_candidates() -> list[Path]:
+    """本程序自带的 adb 候选（开发态项目目录 / 打包 exe 旁 / _MEIPASS）。"""
+    base = app_base_dir()
+    res = resource_dir()
+    seen: set[Path] = set()
+    out: list[Path] = []
+    for c in (
+        base / "tools" / "adb.exe",
+        base / "adb.exe",
+        base / "platform-tools" / "adb.exe",
+        res / "tools" / "adb.exe",
+        res / "adb.exe",
+        res / "platform-tools" / "adb.exe",
+    ):
+        key = c.resolve() if c.exists() else c
+        if key in seen:
+            continue
+        seen.add(key)
+        out.append(c)
+    return out
+
+
 def default_mumu_adb_candidates() -> list[Path]:
-    """MuMu 12 常见 adb 安装路径。"""
+    """MuMu 12 常见 adb 安装路径（自带 adb 找不到时的后备）。"""
     home = Path.home()
     local = os.environ.get("LOCALAPPDATA", "")
     program_files = os.environ.get("ProgramFiles", r"C:\Program Files")
@@ -43,7 +70,7 @@ def default_mumu_adb_candidates() -> list[Path]:
 
 
 def find_adb(preferred: str | None = None) -> str:
-    """按优先级查找 adb：指定路径 → 环境变量 → MuMu 默认 → exe 旁 → PATH。"""
+    """按优先级查找 adb：指定路径 → 环境变量 → 本程序 tools → MuMu → PATH。"""
     import shutil
 
     if preferred:
@@ -56,25 +83,8 @@ def find_adb(preferred: str | None = None) -> str:
         return str(Path(env).resolve())
 
     candidates: list[Path] = []
+    candidates.extend(bundled_adb_candidates())
     candidates.extend(c for c in default_mumu_adb_candidates() if str(c))
-
-    base = app_base_dir()
-    candidates.extend(
-        [
-            base / "tools" / "adb.exe",
-            base / "adb.exe",
-            base / "platform-tools" / "adb.exe",
-        ]
-    )
-    # 打包时也可能打进 _MEIPASS
-    res = resource_dir()
-    candidates.extend(
-        [
-            res / "tools" / "adb.exe",
-            res / "adb.exe",
-            res / "platform-tools" / "adb.exe",
-        ]
-    )
     for c in candidates:
         if c.exists():
             return str(c.resolve())

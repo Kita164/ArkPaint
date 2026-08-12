@@ -3,3 +3,4 @@
 #
 # 品牌资源：
 #   logo/ArkPaint.png  — 窗口图标与 UI 品牌图（打包时由此生成 exe .ico）
+#   screenshot.png     — README 界面展示图
