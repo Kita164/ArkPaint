@@ -72,6 +72,8 @@ from arkpaint.ui.toggle_switch import (
 )
 
 _IMAGE_SUFFIXES = {".png", ".jpg", ".jpeg", ".bmp", ".webp", ".gif"}
+# 左右侧栏等宽，保证中间画布相对窗口居中
+_SIDE_PANEL_WIDTH = 260
 
 
 class ImagePreviewLabel(QLabel):
@@ -213,6 +215,8 @@ class MainWindow(QMainWindow):
         splitter.setStretchFactor(0, 0)
         splitter.setStretchFactor(1, 1)
         splitter.setStretchFactor(2, 0)
+        splitter.setChildrenCollapsible(False)
+        splitter.setSizes([_SIDE_PANEL_WIDTH, 660, _SIDE_PANEL_WIDTH])
         layout.addWidget(splitter)
 
     def _build_left_panel(self) -> QWidget:
@@ -220,8 +224,7 @@ class MainWindow(QMainWindow):
         scroll.setWidgetResizable(True)
         scroll.setFrameShape(QFrame.Shape.NoFrame)
         scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
-        scroll.setMinimumWidth(220)
-        scroll.setMaximumWidth(280)
+        scroll.setFixedWidth(_SIDE_PANEL_WIDTH)
 
         left = QWidget()
         lv = QVBoxLayout(left)
@@ -381,7 +384,7 @@ class MainWindow(QMainWindow):
     def _build_center_panel(self) -> QWidget:
         mid = QWidget()
         mv = QVBoxLayout(mid)
-        mv.setContentsMargins(8, 8, 8, 8)
+        mv.setContentsMargins(12, 8, 12, 8)
 
         header = QHBoxLayout()
         header.addWidget(self._section_title("24×24 像素画布"), 1)
@@ -428,7 +431,7 @@ class MainWindow(QMainWindow):
 
     def _build_right_panel(self) -> QWidget:
         right = QWidget()
-        right.setMinimumWidth(240)
+        right.setFixedWidth(_SIDE_PANEL_WIDTH)
         rv = QVBoxLayout(right)
         rv.setContentsMargins(0, 0, 0, 8)
         rv.setSpacing(8)
