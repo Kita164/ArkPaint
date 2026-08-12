@@ -8,7 +8,14 @@ from pathlib import Path
 import cv2
 import numpy as np
 
-from arkpaint.config import GRID_SIZE, REFERENCE_IMAGE
+from arkpaint.config import (
+    GRID_SIZE,
+    REFERENCE_IMAGE,
+    TEMPLATE_ROI_Y1,
+    UI_LEFT_PANEL_MAX_X,
+    UI_RIGHT_PANEL_MIN_X,
+)
+from arkpaint.core.vision.matcher import match_template
 
 
 @dataclass
@@ -46,11 +53,11 @@ def detect_ui_panel_bounds(bgr: np.ndarray) -> tuple[int, int]:
     dark = gray < 95
     col_ratio = dark.mean(axis=0)
 
-    left_region = col_ratio[: max(1, int(w * 0.30))]
+    left_region = col_ratio[: max(1, int(w * UI_LEFT_PANEL_MAX_X))]
     left_cols = np.where(left_region > 0.35)[0]
     left_end = int(left_cols[-1]) + 1 if len(left_cols) else max(80, int(w * 0.12))
 
-    right_start_idx = w // 2
+    right_start_idx = int(w * UI_RIGHT_PANEL_MIN_X)
     right_region = col_ratio[right_start_idx:]
     right_cols = np.where(right_region > 0.35)[0]
     if len(right_cols):
@@ -219,30 +226,14 @@ def detect_canvas(bgr: np.ndarray) -> tuple[int, int, int, int] | None:
     return _refine_canvas_rect(bgr, (rx + x0, ry, rw, rh))
 
 
-def _template_score(bgr: np.ndarray, template_path: Path) -> float:
+def _template_score(bgr: np.ndarray, template_path: Path, *, threshold: float = 0.55) -> float:
+    """在顶部 ROI 内做模板匹配（对齐 MAA TemplateMatch）。"""
     if not template_path.exists():
         return 0.0
-    tpl = cv2.imread(str(template_path), cv2.IMREAD_COLOR)
-    if tpl is None:
-        return 0.0
-    th, tw = tpl.shape[:2]
-    sh, sw = bgr.shape[:2]
-    scale = sw / float(tw)
-    new_w = sw
-    new_h = max(1, int(th * scale))
-    resized = cv2.resize(tpl, (new_w, new_h))
-    oh = min(sh, resized.shape[0])
-    ow = min(sw, resized.shape[1])
-    a = bgr[:oh, :ow]
-    b = resized[:oh, :ow]
-    a_small = cv2.resize(a, (320, 180))
-    b_small = cv2.resize(b, (320, 180))
-    res = cv2.matchTemplate(
-        cv2.cvtColor(a_small, cv2.COLOR_BGR2GRAY),
-        cv2.cvtColor(b_small, cv2.COLOR_BGR2GRAY),
-        cv2.TM_CCOEFF_NORMED,
-    )
-    return float(res.max()) if res.size else 0.0
+    h, w = bgr.shape[:2]
+    roi = (0, 0, w, max(1, int(h * TEMPLATE_ROI_Y1)))
+    hit = match_template(bgr, template_path, roi=roi, threshold=threshold)
+    return hit.score if hit else 0.0
 
 
 def detect_pindou_screen(

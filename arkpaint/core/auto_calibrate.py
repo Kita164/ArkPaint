@@ -13,7 +13,7 @@ from dataclasses import dataclass
 import cv2
 import numpy as np
 
-from arkpaint.config import GRID_SIZE, PALETTE_COLUMNS
+from arkpaint.config import GRID_SIZE, PALETTE_COLUMNS, PALETTE_ROI_X0, PALETTE_ROI_X1, PALETTE_ROI_Y0, PALETTE_ROI_Y1
 from arkpaint.core.calibration import CalibrationData
 from arkpaint.core.detector import detect_canvas, detect_ui_panel_bounds
 
@@ -35,10 +35,10 @@ def _palette_roi_bounds(
     _cx, _cy, cw, _ch = canvas
     _left, right_panel = detect_ui_panel_bounds(bgr)
     # 与 tools/sample_palette_from_shots.py 一致，适配 1-24 / 16-40 截图
-    x0 = max(int(w * 0.68), _left + cw + max(8, cw // 40))
-    x1 = min(w, max(x0 + 80, int(w * 0.905), right_panel - 4))
-    y0 = int(h * 0.355)
-    y1 = int(h * 0.92)
+    x0 = max(int(w * PALETTE_ROI_X0), _left + cw + max(8, cw // 40))
+    x1 = min(w, max(x0 + 80, int(w * PALETTE_ROI_X1), right_panel - 4))
+    y0 = int(h * PALETTE_ROI_Y0)
+    y1 = int(h * PALETTE_ROI_Y1)
     if x1 - x0 < 40 or y1 - y0 < 80:
         x0, x1 = int(w * 0.68), int(w * 0.92)
         y0, y1 = int(h * 0.34), int(h * 0.94)

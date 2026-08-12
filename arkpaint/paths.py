@@ -97,6 +97,14 @@ def find_adb(preferred: str | None = None) -> str:
 
 def mumu_instance_label(port: int) -> str | None:
     """将端口映射为 MuMu 多开实例说明，如「0号 16384」。"""
+    idx = mumu_instance_from_port(port)
+    if idx is None:
+        return None
+    return f"{idx}号 {port}"
+
+
+def mumu_instance_from_port(port: int) -> int | None:
+    """MuMu 12 多开端口 → 实例编号（0 号 16384，之后 +32）。"""
     from arkpaint.config import MUMU_ADB_BASE_PORT, MUMU_ADB_PORT_STEP
 
     if port < MUMU_ADB_BASE_PORT:
@@ -104,4 +112,49 @@ def mumu_instance_label(port: int) -> str | None:
     delta = port - MUMU_ADB_BASE_PORT
     if delta % MUMU_ADB_PORT_STEP != 0:
         return None
-    return f"{delta // MUMU_ADB_PORT_STEP}号 {port}"
+    return delta // MUMU_ADB_PORT_STEP
+
+
+def find_mumu_install_dir() -> Path | None:
+    """从注册表或常见路径定位 MuMu 12 安装根目录（含 shell/）。"""
+    if os.name != "nt":
+        return None
+
+    names = (
+        "MuMuPlayer-12.0",
+        "MuMuPlayer",
+        "MuMuPlayerGlobal-12.0",
+        "MuMuPlayerGlobal",
+        "YXArkNights-12.0",
+    )
+    try:
+        import winreg
+
+        for name in names:
+            try:
+                key = winreg.OpenKey(
+                    winreg.HKEY_LOCAL_MACHINE,
+                    rf"SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall\{name}",
+                )
+            except OSError:
+                continue
+            try:
+                icon, _ = winreg.QueryValueEx(key, "DisplayIcon")
+            finally:
+                winreg.CloseKey(key)
+            root = Path(str(icon).strip('"')).resolve().parent
+            if (root / "shell").is_dir() or (root / "nx_device").is_dir():
+                return root
+    except Exception:
+        pass
+
+    home = Path.home()
+    local = os.environ.get("LOCALAPPDATA", "")
+    rel = Path("Netease") / "MuMuPlayer-12.0"
+    for base in (home, Path(local) if local else None):
+        if base is None:
+            continue
+        candidate = base / rel
+        if (candidate / "shell").is_dir():
+            return candidate.resolve()
+    return None

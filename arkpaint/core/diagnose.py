@@ -186,7 +186,12 @@ def run_diagnose(
         DiagnoseStep(
             "截取屏幕",
             True,
-            f"{w}×{h}，平均亮度 {gray_mean:.0f}（0–255）",
+            f"{w}×{h}，平均亮度 {gray_mean:.0f}（0–255）"
+            + (
+                f"；方式 {adb.screencap_method.value}"
+                if adb.screencap_method is not None
+                else ""
+            ),
         )
     )
 
