@@ -150,9 +150,9 @@ def _count_visible_rows(
                 if oy + row * dy + dy * 0.35 < roi_h:
                     rows_hit.add(row)
     if rows_hit:
-        return max(1, max(rows_hit) + 1)
-    # 回退：几何推算
-    return max(1, int((roi_h - oy - dy * 0.35) / dy))
+        return min(6, max(1, max(rows_hit) + 1))
+    # 回退：几何推算；游戏 UI 固定约 6 行
+    return min(6, max(1, int((roi_h - oy - dy * 0.35) / dy)))
 
 
 def _sample_colors(
@@ -260,7 +260,7 @@ def auto_calibrate(
             continue
 
         visible_rows = _count_visible_rows(cells, ox_r, oy_r, dx, dy, columns, roi.shape[0])
-        visible_rows = max(3, min(visible_rows, 12))
+        visible_rows = min(6, max(3, visible_rows))
         rps = max(1, min(rows_per_scroll, visible_rows - 1 if visible_rows > 1 else 1))
 
         scroll_from, scroll_to = _build_scroll(ox, oy, dx, dy, visible_rows, rps)

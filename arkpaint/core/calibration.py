@@ -74,6 +74,45 @@ class CalibrationData:
         ox, oy = self.palette_origin
         return int(ox + slot_col * self.palette_dx), int(oy + slot_row * self.palette_dy)
 
+    def palette_tap_bounds(self) -> tuple[int, int, int, int] | None:
+        """可见颜料网格的点击安全区域 (x0, y0, x1, y1)。"""
+        if not self.is_palette_ready() or self.palette_origin is None:
+            return None
+        ox, oy = self.palette_origin
+        dx, dy = self.palette_dx, self.palette_dy
+        cols = self.palette_columns
+        rows = min(self.visible_rows, 6)
+        margin_x = max(4.0, dx * 0.28)
+        margin_y = max(4.0, dy * 0.28)
+        x0 = int(ox - margin_x)
+        x1 = int(ox + (cols - 1) * dx + margin_x)
+        y0 = int(oy - margin_y)
+        # 底部留出滚动箭头区域，避免误点
+        y1 = int(oy + (rows - 1) * dy + margin_y * 0.6)
+        return x0, y0, x1, y1
+
+    def clamp_palette_tap(self, x: int, y: int) -> tuple[int, int]:
+        bounds = self.palette_tap_bounds()
+        if bounds is None:
+            return x, y
+        x0, y0, x1, y1 = bounds
+        return min(max(x, x0), x1), min(max(y, y0), y1)
+
+    def clamp_canvas_tap(self, x: int, y: int) -> tuple[int, int]:
+        rect = self.canvas_rect()
+        if rect is None:
+            return x, y
+        cx, cy, cw, ch = rect
+        margin = 2
+        return (
+            min(max(x, cx + margin), cx + cw - margin),
+            min(max(y, cy + margin), cy + ch - margin),
+        )
+
+    def clamped_visible_slot_center(self, slot_row: int, slot_col: int) -> tuple[int, int]:
+        x, y = self.visible_slot_center(slot_row, slot_col)
+        return self.clamp_palette_tap(x, y)
+
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
 
@@ -122,7 +161,6 @@ def cell_center_from_calibration(
     if rect is None:
         raise RuntimeError("画布未校准")
     x, y, w, h = rect
-    return (
-        int(x + (col + 0.5) * (w / grid)),
-        int(y + (row + 0.5) * (h / grid)),
-    )
+    cx = int(x + (col + 0.5) * (w / grid))
+    cy = int(y + (row + 0.5) * (h / grid))
+    return calib.clamp_canvas_tap(cx, cy)

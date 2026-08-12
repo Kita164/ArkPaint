@@ -57,7 +57,7 @@ from arkpaint.core.image_processor import (
     normalize_algorithm,
 )
 from arkpaint.core.painter import AutoPainter, PaintOptions, PaintProgress
-from arkpaint.core.palette import DEFAULT_PALETTE, PaletteColor, find_white_index, rebuild_palette
+from arkpaint.core.palette import DEFAULT_PALETTE, PaletteColor, find_white_index
 from arkpaint.paths import default_adb_path, find_adb, mumu_instance_label
 from arkpaint.ui.calibrate_dialog import CalibrateDialog
 from arkpaint.ui.diagnose_dialog import show_diagnose_report
@@ -124,6 +124,7 @@ class PaintWorker(QThread):
         calib: CalibrationData,
         grid: np.ndarray,
         options: PaintOptions,
+        palette: list[PaletteColor],
         parent=None,
     ) -> None:
         super().__init__(parent)
@@ -131,6 +132,7 @@ class PaintWorker(QThread):
         self._calib = calib
         self._grid = grid
         self._options = options
+        self._palette = palette
         self._stop = False
 
     def stop(self) -> None:
@@ -145,6 +147,7 @@ class PaintWorker(QThread):
                 on_progress=lambda p: self.progress.emit(p),
                 on_color=lambda c: self.color_changed.emit(c),
                 should_stop=lambda: self._stop,
+                reference_palette=self._palette,
             )
             if not self._stop:
                 self.finished_ok.emit()
@@ -163,7 +166,6 @@ class MainWindow(QMainWindow):
         self.adb = AdbController()
         self.calib = load_calibration()
         self.palette: list[PaletteColor] = list(DEFAULT_PALETTE)
-        self._apply_sampled_palette()
         self._worker: PaintWorker | None = None
         self._settings = load_json(SETTINGS_PATH, {})
         self._source_image_path: str | None = None
@@ -188,18 +190,6 @@ class MainWindow(QMainWindow):
         undo_app = QShortcut(QKeySequence.StandardKey.Undo, self)
         undo_app.activated.connect(self.undo_canvas)
         self._update_pixel_thumb()
-
-    def _apply_sampled_palette(self) -> None:
-        if self.calib.sampled_rgbs:
-            rgbs = [tuple(c) for c in self.calib.sampled_rgbs]  # type: ignore[misc]
-            # 若采样色少于默认，用默认补齐编号靠后的色
-            if len(rgbs) < len(DEFAULT_PALETTE):
-                extra = [c.rgb for c in DEFAULT_PALETTE[len(rgbs) :]]
-                rgbs = list(rgbs) + extra  # type: ignore[assignment]
-            # 若校准声明更多色数，占位扩展
-            while len(rgbs) < self.calib.total_colors:
-                rgbs.append((200, 200, 200))
-            self.palette = rebuild_palette(rgbs[: self.calib.total_colors])  # type: ignore[arg-type]
 
     def _build_ui(self) -> None:
         central = QWidget()
@@ -900,7 +890,7 @@ class MainWindow(QMainWindow):
 
     def _apply_calibration(self, calib: CalibrationData, status: str = "校准已更新") -> None:
         self.calib = calib
-        self._apply_sampled_palette()
+        # 程序色盘顺序固定为 DEFAULT_PALETTE，不以游戏当前截图覆盖
         self.palette_panel.set_palette(self.palette)
         self.canvas.set_palette(self.palette)
         self._update_pixel_thumb()
@@ -1020,7 +1010,7 @@ class MainWindow(QMainWindow):
             skip_empty=self.skip_white.isChecked(),
         )
         self._save_settings()
-        self._worker = PaintWorker(self.adb, self.calib, self.canvas.grid(), options, self)
+        self._worker = PaintWorker(self.adb, self.calib, self.canvas.grid(), options, self.palette, self)
         self._worker.progress.connect(self._on_progress)
         self._worker.color_changed.connect(self._on_drawing_color)
         self._worker.finished_ok.connect(self._on_paint_done)
