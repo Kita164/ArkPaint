@@ -9,7 +9,7 @@ from pathlib import Path
 import cv2
 import numpy as np
 
-from arkpaint.config import DEBUG_DIR, REFERENCE_IMAGE, ensure_dirs
+from arkpaint.config import DEBUG_DIR, GRID_SIZE, REFERENCE_IMAGE, ensure_dirs
 from arkpaint.core.adb import AdbController, AdbError
 from arkpaint.core.auto_calibrate import (
     _palette_roi_bounds,
@@ -17,7 +17,7 @@ from arkpaint.core.auto_calibrate import (
     detect_palette_cells,
 )
 from arkpaint.core.calibration import CalibrationData
-from arkpaint.core.detector import canvas_white_mask, detect_canvas, detect_pindou_screen
+from arkpaint.core.detector import canvas_white_mask, cell_center, detect_canvas, detect_pindou_screen
 
 
 @dataclass
@@ -35,6 +35,7 @@ class DiagnoseReport:
     debug_dir: Path = DEBUG_DIR
     screenshot_path: Path | None = None
     overlay_path: Path | None = None
+    verify_grid_path: Path | None = None
     mask_path: Path | None = None
     report_path: Path | None = None
     calibration: CalibrationData | None = None
@@ -57,6 +58,8 @@ class DiagnoseReport:
             lines.append(f"  白块蒙版：{self.mask_path.name}")
         if self.overlay_path:
             lines.append(f"  标注图：{self.overlay_path.name}")
+        if self.verify_grid_path:
+            lines.append(f"  网格校验：{self.verify_grid_path.name}")
         if self.report_path:
             lines.append(f"  报告：{self.report_path.name}")
         return "\n".join(lines)
@@ -72,8 +75,8 @@ def _hint_for_screenshot(bgr: np.ndarray, white_ratio: float) -> str:
         return "画面偏暗且几乎没有白块，多半不在拼豆编辑页"
     if white_ratio < 0.03:
         return "白色区域太少，请打开拼豆编辑页并让中央画布完整可见"
-    if white_ratio > 0.45:
-        return "白块很多但不是正方形画布，可能开了别的界面或系统桌面"
+    if white_ratio > 0.55:
+        return "近纯白区域过多，可能截到了错误界面（画布检测已改用更高阈值）"
     if w < 400 or h < 400:
         return f"分辨率偏低（{w}×{h}），识别可能不稳定"
     return ""
@@ -122,6 +125,71 @@ def _draw_overlay(
     return vis
 
 
+def _draw_verify_grid(
+    bgr: np.ndarray,
+    *,
+    canvas: tuple[int, int, int, int] | None,
+    palette_roi: tuple[int, int, int, int] | None,
+    calibration: CalibrationData | None,
+) -> np.ndarray:
+    """画布 24×24 网格 + 色号 1–4 点击点，便于用户直观核对识别效果。"""
+    vis = bgr.copy()
+    if canvas is not None:
+        x, y, cw, ch = canvas
+        cv2.rectangle(vis, (x, y), (x + cw, y + ch), (0, 255, 0), 2)
+        for i in range(GRID_SIZE + 1):
+            xx = int(round(x + i * cw / GRID_SIZE))
+            yy = int(round(y + i * ch / GRID_SIZE))
+            cv2.line(vis, (xx, y), (xx, y + ch), (0, 200, 0), 1)
+            cv2.line(vis, (x, yy), (x + cw, yy), (0, 200, 0), 1)
+        for r, c in ((0, 0), (0, GRID_SIZE - 1), (GRID_SIZE - 1, 0), (GRID_SIZE - 1, GRID_SIZE - 1)):
+            cx, cy = cell_center(canvas, r, c)
+            cv2.drawMarker(vis, (cx, cy), (255, 80, 0), cv2.MARKER_CROSS, 14, 2)
+        cv2.putText(
+            vis,
+            f"canvas {cw}x{ch}  24x24",
+            (x, max(22, y - 8)),
+            cv2.FONT_HERSHEY_SIMPLEX,
+            0.65,
+            (0, 255, 0),
+            2,
+            cv2.LINE_AA,
+        )
+
+    if palette_roi is not None:
+        x0, y0, x1, y1 = palette_roi
+        cv2.rectangle(vis, (x0, y0), (x1, y1), (0, 200, 255), 2)
+        cv2.putText(
+            vis,
+            "palette ROI",
+            (x0, max(22, y0 - 8)),
+            cv2.FONT_HERSHEY_SIMPLEX,
+            0.55,
+            (0, 200, 255),
+            2,
+            cv2.LINE_AA,
+        )
+
+    if calibration is not None and calibration.is_palette_ready():
+        for i in range(1, 5):
+            try:
+                px, py = calibration.color_center(i)
+            except RuntimeError:
+                continue
+            cv2.circle(vis, (px, py), 10, (0, 0, 255), 2)
+            cv2.putText(
+                vis,
+                str(i),
+                (px - 5, py - 14),
+                cv2.FONT_HERSHEY_SIMPLEX,
+                0.55,
+                (0, 0, 255),
+                2,
+                cv2.LINE_AA,
+            )
+    return vis
+
+
 def run_diagnose(
     adb: AdbController,
     *,
@@ -141,6 +209,7 @@ def run_diagnose(
     screenshot_path = debug_dir / "screencap.png"
     mask_path = debug_dir / "mask.png"
     overlay_path = debug_dir / "overlay.png"
+    verify_grid_path = debug_dir / "verify_grid.png"
     report_path = debug_dir / "report.txt"
 
     # 1. ADB
@@ -254,6 +323,10 @@ def run_diagnose(
 
     overlay = _draw_overlay(shot, canvas=canvas, palette_roi=palette_roi, cells=cells)
     cv2.imwrite(str(overlay_path), overlay)
+    verify = _draw_verify_grid(
+        shot, canvas=canvas, palette_roi=palette_roi, calibration=calibration
+    )
+    cv2.imwrite(str(verify_grid_path), verify)
 
     ok = bool(detected.ok and calibration is not None)
     if ok:
@@ -272,6 +345,7 @@ def run_diagnose(
         debug_dir=debug_dir,
         screenshot_path=screenshot_path,
         overlay_path=overlay_path,
+        verify_grid_path=verify_grid_path,
         mask_path=mask_path,
         report_path=report_path,
         calibration=calibration,

@@ -15,9 +15,12 @@ from arkpaint.core.calibration import (
 )
 from arkpaint.core.detector import DetectResult, cell_center, detect_pindou_screen
 from arkpaint.core.palette import DEFAULT_PALETTE, PaletteColor, palette_to_rgb_list
+from arkpaint.core.auto_calibrate import refresh_palette_layout
 from arkpaint.core.palette_align import (
     FIRST_PAGE_COLORS,
     PALETTE_BOTTOM_SCROLL_SWIPES,
+    PALETTE_POST_SCROLL_S,
+    PALETTE_SCROLL_SETTLE_S,
     PALETTE_TOP_SCROLL_SWIPES,
     PALETTE_VISIBLE_ROWS,
     bottom_row_matches,
@@ -68,7 +71,7 @@ class AutoPainter:
         return detect_pindou_screen(shot, min_confidence=min_confidence)
 
     def _swipe_palette_reset_step(self) -> None:
-        """在颜料区从上往下滑一步，使色板回到顶部。"""
+        """在颜料区从上往下滑一步，使色板回到顶部（与上滑同幅度反向）。"""
         if not self.calib.scroll_from or not self.calib.scroll_to:
             return
         x1, y1 = self.calib.scroll_to
@@ -83,78 +86,113 @@ class AutoPainter:
         x2, y2 = self.calib.scroll_to
         self.adb.swipe(x1, y1, x2, y2, self.calib.scroll_duration_ms)
 
+    def _palette_top_matched(self, reference_rgbs: list[tuple[int, int, int]] | None = None) -> bool:
+        """截图判断颜料栏是否已在顶部（可见首行 = 色号 1–4）。"""
+        refs = reference_rgbs if reference_rgbs is not None else self._reference_rgbs
+        if not refs:
+            return False
+        shot = self.adb.screencap()
+        return top_row_matches(shot, self.calib, refs[:4])
+
+    def _wait_palette_settle(self, *, refresh: bool = True) -> None:
+        """拖动结束后停稳，并按当前画面重测色块坐标。"""
+        time.sleep(PALETTE_POST_SCROLL_S)
+        if not refresh:
+            return
+        try:
+            shot = self.adb.screencap()
+        except Exception:  # noqa: BLE001
+            return
+        refresh_palette_layout(shot, self.calib)
+
     def _ensure_palette_at_top(
         self,
         reference_rgbs: list[tuple[int, int, int]],
         *,
         should_stop: StopCheck | None = None,
     ) -> None:
-        """将游戏颜料栏滚回顶部，并与程序前 4 色比对确认对齐。"""
+        """将游戏颜料栏滚回顶部，停稳后重测色块，再与程序前 4 色确认。"""
         if not self.calib.is_palette_ready():
             raise RuntimeError("颜料栏未校准")
         if not reference_rgbs:
             return
 
         expected = reference_rgbs[:4]
-        max_attempts = 4
+        did_swipe = False
 
-        for attempt in range(max_attempts + 1):
-            if should_stop and should_stop():
-                return
-            shot = self.adb.screencap()
-            if top_row_matches(shot, self.calib, expected):
-                time.sleep(0.5)
+        # 已在顶部：仍停稳并重测，避免沿用「非顶部时」校准出的旧间距
+        if self._palette_top_matched(reference_rgbs):
+            self._wait_palette_settle(refresh=True)
+            if self._palette_top_matched(reference_rgbs):
                 self._view_top_row = 0
                 return
-            if attempt >= max_attempts:
-                break
-            self._swipe_palette_reset_step()
-            time.sleep(0.35)
 
-        # 兜底：再滑几次并等待动画结束
-        for _ in range(2):
+        for _ in range(PALETTE_TOP_SCROLL_SWIPES):
             if should_stop and should_stop():
                 return
             self._swipe_palette_reset_step()
-            time.sleep(0.2)
-        time.sleep(0.5)
+            did_swipe = True
+            time.sleep(PALETTE_SCROLL_SETTLE_S)
+            if top_row_matches(self.adb.screencap(), self.calib, expected):
+                break
+
+        self._wait_palette_settle(refresh=True)
+        # 用刷新后的坐标再确认一次
+        if not top_row_matches(self.adb.screencap(), self.calib, expected) and did_swipe:
+            # 坐标刚刷新仍不像顶部时，再轻等一拍（不再追加盲滑）
+            time.sleep(0.35)
         self._view_top_row = 0
 
     def _bottom_view_top(self) -> int:
-        cols = self.calib.palette_columns
-        visible = min(PALETTE_VISIBLE_ROWS, max(1, self.calib.visible_rows))
-        return bottom_view_top_row(self.calib.total_colors, columns=cols, visible_rows=visible)
+        """滚到底时视口顶行绝对行号。固定按 6 行可见（勿用波动的 calib.visible_rows）。"""
+        cols = self.calib.palette_columns or 4
+        return bottom_view_top_row(
+            self.calib.total_colors,
+            columns=cols,
+            visible_rows=PALETTE_VISIBLE_ROWS,
+        )
 
     def _scroll_palette_to_top(self, *, should_stop: StopCheck | None = None) -> None:
-        """快速滚回顶部（色号 1–24 区域）。"""
+        """滚回顶部（色号 1–24 区域）；停稳后重测色块。"""
         if self._view_top_row == 0:
             return
         for _ in range(PALETTE_TOP_SCROLL_SWIPES):
             if should_stop and should_stop():
                 return
             self._swipe_palette_reset_step()
-            time.sleep(0.15)
-        time.sleep(0.35)
+            time.sleep(PALETTE_SCROLL_SETTLE_S)
+            if self._reference_rgbs and self._palette_top_matched():
+                break
+        self._wait_palette_settle(refresh=True)
         self._view_top_row = 0
 
     def _scroll_palette_to_bottom(self, *, should_stop: StopCheck | None = None) -> None:
-        """从顶部一次性滑到底，展示约 17–40 号色（顶部略露 13–16）。"""
+        """从顶部滑到底（约 17–40 可见）。
+
+        已在顶部时直接下滑，勿先回顶。通常 1 次即到底；多滑会回弹并把选色算错。
+        """
         bottom = self._bottom_view_top()
         if self._view_top_row == bottom:
             return
-        # 若当前不在顶部，先回顶再一次性上滑到底
+        # 仅当停在半页时才先回顶；view_top_row==0 时直接下滑
         if self._view_top_row > 0:
             self._scroll_palette_to_top(should_stop=should_stop)
+
         for i in range(PALETTE_BOTTOM_SCROLL_SWIPES):
             if should_stop and should_stop():
                 return
             self._swipe_palette_reveal_step()
-            time.sleep(0.15)
+            time.sleep(PALETTE_SCROLL_SETTLE_S)
             if self._reference_rgbs:
                 shot = self.adb.screencap()
                 if bottom_row_matches(shot, self.calib, self._reference_rgbs):
                     break
-        time.sleep(0.5)
+            elif i == 0:
+                # 无参考色时也只滑必要次数，避免连滑回弹
+                break
+
+        # 底部不要 refresh 网格：半格/箭头易把 dx、visible_rows 测歪（29→25）
+        self._wait_palette_settle(refresh=False)
         self._view_top_row = bottom
 
     def _ensure_palette_zone(self, color_index: int, *, should_stop: StopCheck | None = None) -> None:
@@ -165,20 +203,27 @@ class AutoPainter:
             self._scroll_palette_to_bottom(should_stop=should_stop)
 
     def _select_color(self, color_index: int, *, should_stop: StopCheck | None = None) -> None:
-        """选择指定色号：切换到对应颜料区域后点击槽位。"""
+        """选择指定色号：切换区域并停稳后点击槽位。"""
         if not self.calib.is_palette_ready():
             raise RuntimeError("颜料栏未校准")
 
+        prev_top = self._view_top_row
         self._ensure_palette_zone(color_index, should_stop=should_stop)
 
         idx0 = color_index - 1
-        abs_row = idx0 // self.calib.palette_columns
-        col = idx0 % self.calib.palette_columns
-        visible = min(PALETTE_VISIBLE_ROWS, max(1, self.calib.visible_rows))
+        cols = self.calib.palette_columns or 4
+        abs_row = idx0 // cols
+        col = idx0 % cols
+        # 固定 6 行可见，避免 visible_rows=5 时把 29 映射到 25 的槽位
+        visible = PALETTE_VISIBLE_ROWS
 
         slot_row = abs_row - self._view_top_row
         slot_row = min(max(slot_row, 0), visible - 1)
         x, y = self.calib.clamped_visible_slot_center(slot_row, col)
+        if self._view_top_row != prev_top:
+            time.sleep(0.25)
+        self.adb.tap(x, y)
+        time.sleep(0.12)
         self.adb.tap(x, y)
 
     def paint(
@@ -240,6 +285,8 @@ class AutoPainter:
         if should_stop():
             emit("已停止", fraction=0.0)
             return
+        # 对齐后的额外停顿：确保列表完全静止再开始选色
+        time.sleep(0.35)
 
         # 按颜色分组，减少切色次数
         groups: dict[int, list[tuple[int, int]]] = defaultdict(list)

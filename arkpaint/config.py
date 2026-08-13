@@ -24,7 +24,7 @@ DEFAULT_DETECT_CONFIDENCE = 0.72
 
 # 绘制间隔（毫秒），过快可能导致游戏丢点
 DEFAULT_TAP_DELAY_MS = 45
-DEFAULT_COLOR_SWITCH_DELAY_MS = 180
+DEFAULT_COLOR_SWITCH_DELAY_MS = 280
 
 ROOT_DIR = app_base_dir()
 ASSETS_DIR = resource_dir() / "assets"

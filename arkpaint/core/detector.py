@@ -63,16 +63,20 @@ def detect_ui_panel_bounds(bgr: np.ndarray) -> tuple[int, int]:
     return left_end, right_start
 
 
-def canvas_white_mask(bgr: np.ndarray) -> np.ndarray:
+# 拼豆画布近纯白；工作区浅灰常 >200，必须用更高阈值才能分开
+CANVAS_WHITE_THR = 240
+
+
+def canvas_white_mask(bgr: np.ndarray, thr: int = CANVAS_WHITE_THR) -> np.ndarray:
     """画布检测用的偏白二值图（调试时可保存对照）。"""
     gray = cv2.cvtColor(bgr, cv2.COLOR_BGR2GRAY)
-    _, mask = cv2.threshold(gray, 200, 255, cv2.THRESH_BINARY)
+    _, mask = cv2.threshold(gray, thr, 255, cv2.THRESH_BINARY)
     kernel = np.ones((5, 5), np.uint8)
     return cv2.morphologyEx(mask, cv2.MORPH_CLOSE, kernel, iterations=2)
 
 
 def detect_canvas_region(bgr: np.ndarray) -> tuple[int, int, int, int] | None:
-    """在截图中寻找中央接近正方形的白色画布区域（旧：整图白块，浅色背景易失败）。"""
+    """在截图中寻找中央接近正方形的白色画布区域。"""
     h, w = bgr.shape[:2]
     mask = canvas_white_mask(bgr)
     contours, _ = cv2.findContours(mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
@@ -83,10 +87,16 @@ def detect_canvas_region(bgr: np.ndarray) -> tuple[int, int, int, int] | None:
 def _refine_canvas_rect(
     bgr: np.ndarray, rect: tuple[int, int, int, int]
 ) -> tuple[int, int, int, int]:
-    """在粗定位的白块内，用边缘投影收紧到网格外缘。"""
+    """在粗定位的白块内，用高阈值白底收紧到网格外缘。"""
     x, y, w, h = rect
     ratio = w / float(h)
-    if 0.92 <= ratio <= 1.08 and 200 <= w <= int(bgr.shape[1] * 0.48):
+    # 已是合理正方形且明显小于半屏宽、未贴顶时，可直接采用
+    if (
+        0.92 <= ratio <= 1.08
+        and 200 <= w <= int(bgr.shape[1] * 0.55)
+        and y >= max(8, int(bgr.shape[0] * 0.05))
+        and y + h <= bgr.shape[0] - 4
+    ):
         return rect
 
     pad = max(2, min(w, h) // 80)
@@ -99,7 +109,7 @@ def _refine_canvas_rect(
         return rect
 
     gray = cv2.cvtColor(roi, cv2.COLOR_BGR2GRAY)
-    _, mask = cv2.threshold(gray, 200, 255, cv2.THRESH_BINARY)
+    _, mask = cv2.threshold(gray, CANVAS_WHITE_THR, 255, cv2.THRESH_BINARY)
     k = max(3, min(roi.shape[0], roi.shape[1]) // 60)
     if k % 2 == 0:
         k += 1
@@ -118,6 +128,27 @@ def _refine_canvas_rect(
     if ratio < 0.85 or ratio > 1.15:
         return rect
     return (x0 + rx0, y0 + ry0, rw, rh)
+
+
+def _is_plausible_canvas(
+    bgr: np.ndarray, rect: tuple[int, int, int, int]
+) -> bool:
+    """拒绝贴顶/贴底的整屏白块（浅色背景误检）。"""
+    x, y, w, h = rect
+    img_h, img_w = bgr.shape[:2]
+    if w < 120 or h < 120:
+        return False
+    ratio = w / float(h)
+    if ratio < 0.85 or ratio > 1.15:
+        return False
+    # 真实画布不会从 y=0 拉满整高
+    if y <= 2 and h >= img_h * 0.92:
+        return False
+    if h >= img_h * 0.92:
+        return False
+    if w > img_w * 0.72:
+        return False
+    return True
 
 
 def _merge_canvas_quadrants(
@@ -150,55 +181,80 @@ def _merge_canvas_quadrants(
 def _detect_canvas_in_workspace(
     bgr: np.ndarray, left_x: int, right_x: int
 ) -> tuple[int, int, int, int] | None:
-    """在左右面板之间，用网格白底 + 边缘密度定位正方形画布。"""
+    """在左右面板之间，用近纯白底定位正方形画布。
+
+    工作区浅灰亮度常 >220，必须用更高阈值，否则会与背景连成整屏白块。
+    """
     h, w = bgr.shape[:2]
     ws_w = max(1, right_x - left_x)
     ws = bgr[:, left_x:right_x]
     gray = cv2.cvtColor(ws, cv2.COLOR_BGR2GRAY)
 
-    _, mask = cv2.threshold(gray, 220, 255, cv2.THRESH_BINARY)
-    k = 7
-    kernel = np.ones((k, k), np.uint8)
-    mask = cv2.morphologyEx(mask, cv2.MORPH_OPEN, kernel)
+    # 先高阈值找整块画布；必要时再略降以兼容更暗截图
+    for thr in (CANVAS_WHITE_THR, 235, 230):
+        _, mask = cv2.threshold(gray, thr, 255, cv2.THRESH_BINARY)
+        k = 9
+        kernel = np.ones((k, k), np.uint8)
+        mask = cv2.morphologyEx(mask, cv2.MORPH_CLOSE, kernel, iterations=2)
+        mask = cv2.morphologyEx(mask, cv2.MORPH_OPEN, np.ones((5, 5), np.uint8))
 
-    contours, _ = cv2.findContours(mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
-    min_side = max(160, int(min(h, ws_w) * 0.22))
-    max_side = int(min(h, ws_w) * 0.52)
-    min_area = min_side * min_side
-    ws_cx = ws_w / 2.0
-    img_cy = h / 2.0
+        contours, _ = cv2.findContours(mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+        min_side = max(160, int(min(h, ws_w) * 0.22))
+        # 整块 24×24 画布约占工作区 70%+，旧 0.52 会把正确白块滤掉只剩象限
+        max_side = int(min(h, ws_w) * 0.88)
+        min_area = min_side * min_side
+        ws_cx = ws_w / 2.0
+        img_cy = h / 2.0
 
-    candidates: list[tuple[int, int, int, int, float]] = []
-    for cnt in contours:
-        x, y, bw, bh = cv2.boundingRect(cnt)
-        area = bw * bh
-        if area < min_area or bw < min_side or bh < min_side:
+        candidates: list[tuple[int, int, int, int, float]] = []
+        for cnt in contours:
+            x, y, bw, bh = cv2.boundingRect(cnt)
+            area = bw * bh
+            if area < min_area or bw < min_side or bh < min_side:
+                continue
+            if bw > max_side or bh > max_side:
+                continue
+            ratio = bw / float(bh)
+            if ratio < 0.88 or ratio > 1.12:
+                continue
+            # 贴顶的整列白块基本是顶栏/背景误检
+            if y <= 2 and bh >= h * 0.85:
+                continue
+            roi = gray[y : y + bh, x : x + bw]
+            # 网格线很淡；高阈值下白块本身已够区分，边缘只作加分
+            edge_ratio = float(cv2.Canny(roi, 30, 90).mean())
+            white_ratio = float(np.count_nonzero(roi >= thr)) / max(1, roi.size)
+            if white_ratio < 0.55 and edge_ratio < 3.0:
+                continue
+            cx = x + bw / 2.0
+            cy = y + bh / 2.0
+            center_penalty = abs(cx - ws_cx) / ws_w + abs(cy - img_cy) / h
+            score = area * (1.0 - abs(1.0 - ratio)) * (1.0 - center_penalty * 0.65)
+            score *= 1.0 + edge_ratio / 25.0
+            score *= 0.85 + 0.3 * white_ratio
+            candidates.append((left_x + x, y, bw, bh, score))
+
+        if not candidates:
             continue
-        if bw > max_side or bh > max_side:
-            continue
-        ratio = bw / float(bh)
-        if ratio < 0.88 or ratio > 1.12:
-            continue
-        roi = gray[y : y + bh, x : x + bw]
-        edge_ratio = float(cv2.Canny(roi, 40, 120).mean())
-        if edge_ratio < 7.0:
-            continue
-        cx = x + bw / 2.0
-        cy = y + bh / 2.0
-        center_penalty = abs(cx - ws_cx) / ws_w + abs(cy - img_cy) / h
-        score = area * (1.0 - abs(1.0 - ratio)) * (1.0 - center_penalty * 0.65)
-        score *= 1.0 + edge_ratio / 25.0
-        candidates.append((left_x + x, y, bw, bh, score))
 
-    if not candidates:
-        return None
+        # 优先取最大接近正方形的整块；仅在多块相近小时合并象限
+        best = max(candidates, key=lambda c: c[4])
+        best_side = min(best[2], best[3])
+        small_tiles = [
+            (c[0], c[1], c[2], c[3])
+            for c in candidates
+            if min(c[2], c[3]) <= best_side * 0.62
+        ]
+        if len(small_tiles) >= 2 and best_side < min(h, ws_w) * 0.45:
+            merged = _merge_canvas_quadrants(small_tiles)
+            if merged is not None and _is_plausible_canvas(bgr, merged):
+                return merged
 
-    merged = _merge_canvas_quadrants([(c[0], c[1], c[2], c[3]) for c in candidates])
-    if merged is not None:
-        return merged
+        rect = (best[0], best[1], best[2], best[3])
+        if _is_plausible_canvas(bgr, rect):
+            return rect
 
-    best = max(candidates, key=lambda c: c[4])
-    return (best[0], best[1], best[2], best[3])
+    return None
 
 
 def detect_canvas(bgr: np.ndarray) -> tuple[int, int, int, int] | None:
@@ -206,9 +262,13 @@ def detect_canvas(bgr: np.ndarray) -> tuple[int, int, int, int] | None:
     left_x, right_x = detect_ui_panel_bounds(bgr)
     rough = _detect_canvas_in_workspace(bgr, left_x, right_x)
     if rough is not None:
-        return rough
+        refined = _refine_canvas_rect(bgr, rough)
+        if _is_plausible_canvas(bgr, refined):
+            return refined
+        if _is_plausible_canvas(bgr, rough):
+            return rough
 
-    # 回退：中部裁剪 + 旧白块法
+    # 回退：中部裁剪 + 高阈值白块
     h, w = bgr.shape[:2]
     x0, x1 = int(w * 0.18), int(w * 0.72)
     cropped = bgr[:, x0:x1]
@@ -216,7 +276,12 @@ def detect_canvas(bgr: np.ndarray) -> tuple[int, int, int, int] | None:
     if rough is None:
         return None
     rx, ry, rw, rh = rough
-    return _refine_canvas_rect(bgr, (rx + x0, ry, rw, rh))
+    refined = _refine_canvas_rect(bgr, (rx + x0, ry, rw, rh))
+    if _is_plausible_canvas(bgr, refined):
+        return refined
+    if _is_plausible_canvas(bgr, (rx + x0, ry, rw, rh)):
+        return (rx + x0, ry, rw, rh)
+    return None
 
 
 def _template_score(bgr: np.ndarray, template_path: Path) -> float:

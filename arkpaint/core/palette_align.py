@@ -10,10 +10,14 @@ from arkpaint.core.calibration import CalibrationData
 PALETTE_VISIBLE_ROWS = 6
 PALETTE_VISIBLE_COLS = 4
 FIRST_PAGE_COLORS = PALETTE_VISIBLE_ROWS * PALETTE_VISIBLE_COLS  # 24
-# 从顶部滚到底部大约需要的上滑次数（露出 17–40）
-PALETTE_BOTTOM_SCROLL_SWIPES = 4
-PALETTE_TOP_SCROLL_SWIPES = 4
-PALETTE_MATCH_MAX_DIST = 48.0
+# 从顶部滑到底 / 回顶：游戏惯性下 1 次通常够；最多再补 1 次，避免多滑回弹
+PALETTE_BOTTOM_SCROLL_SWIPES = 2
+PALETTE_TOP_SCROLL_SWIPES = 2
+# 单次滑动后等待列表动画
+PALETTE_SCROLL_SETTLE_S = 0.7
+# 整段拖动结束 → 重新定位色块 / 选色 之前的停稳时间
+PALETTE_POST_SCROLL_S = 1.0
+PALETTE_MATCH_MAX_DIST = 55.0
 
 
 def bottom_view_top_row(
@@ -101,7 +105,10 @@ def bottom_row_matches(
     *,
     max_dist: float = PALETTE_MATCH_MAX_DIST,
 ) -> bool:
-    """滚到底部后，最上一行应为色号 17–20。"""
-    if len(reference) < 20:
+    """是否已滚到底部：首行≈17–20，或末行≈37–40。"""
+    if len(reference) < 40:
         return False
-    return row_matches(bgr, calib, 0, reference[16:20], max_dist=max_dist)
+    if row_matches(bgr, calib, 0, reference[16:20], max_dist=max_dist):
+        return True
+    # 可见 6 行时，最后一行应为 37–40
+    return row_matches(bgr, calib, PALETTE_VISIBLE_ROWS - 1, reference[36:40], max_dist=max_dist)

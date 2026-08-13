@@ -59,7 +59,6 @@ from arkpaint.core.image_processor import (
 from arkpaint.core.painter import AutoPainter, PaintOptions, PaintProgress
 from arkpaint.core.palette import DEFAULT_PALETTE, PaletteColor, find_white_index
 from arkpaint.paths import default_adb_path, find_adb, mumu_instance_label
-from arkpaint.ui.calibrate_dialog import CalibrateDialog
 from arkpaint.ui.diagnose_dialog import show_diagnose_report
 from arkpaint.ui.canvas_widget import PixelCanvas
 from arkpaint.ui.palette_widget import PalettePanel
@@ -359,9 +358,8 @@ class MainWindow(QMainWindow):
         tip = QLabel(
             "使用说明：\n"
             "1. 导入/拖入/截图 → 选转换算法 → 拖动正方形框选区域 → 转为 24×24\n"
-            "2. 连接 MuMu ADB\n"
-            "3. 打开游戏拼豆编辑页（色板默认在顶部）\n"
-            "4. 点「开始绘图」即可（自动识别画布与色板）"
+            "2. 打开游戏拼豆编辑页\n"
+            "3. 直接点「开始绘图」（会按默认配置自动连接并识别画布/色板）"
         )
         tip.setObjectName("hint")
         tip.setWordWrap(True)
@@ -451,7 +449,7 @@ class MainWindow(QMainWindow):
         self.btn_paint = QPushButton("开始绘图")
         self.btn_paint.setObjectName("primaryButton")
         self.btn_paint.setMinimumHeight(36)
-        self.btn_paint.setToolTip("自动识别画布与颜料栏后开始绘制")
+        self.btn_paint.setToolTip("未连接时按默认配置自动连接，并识别画布与颜料栏后开始绘制")
         self.btn_paint.clicked.connect(self.toggle_paint)
         pv.addWidget(self.btn_paint)
 
@@ -832,12 +830,20 @@ class MainWindow(QMainWindow):
         return ports
 
     def connect_adb(self) -> None:
+        self._try_connect_adb(quiet=False)
+
+    def _try_connect_adb(self, *, quiet: bool = False) -> bool:
+        """按当前/默认配置尝试连接模拟器。成功返回 True。
+
+        quiet=True：成功时不弹窗（供「开始绘图」静默连）；失败时仍提示配置错误。
+        """
         host = self.host_edit.text().strip() or DEFAULT_ADB_HOST
         adb_path = self._auto_detect_adb(silent=True) or self.adb_path_edit.text().strip() or find_adb()
         self.adb.adb_path = adb_path
 
         self.device_label.setText("正在连接…")
         self.progress_label.setText("正在尝试连接模拟器…")
+        QApplication.processEvents()
 
         last_err = ""
         for port in self._candidate_ports():
@@ -847,13 +853,16 @@ class MainWindow(QMainWindow):
                 target = f"{host}:{port}"
                 online = [d for d in devices if d.state == "device"]
                 matched = next((d for d in online if d.serial == target), None)
-                chosen = matched or (online[0] if online else None)
-                if not chosen:
-                    last_err = msg or f"{target} 无在线设备"
+                # 必须选中当前端口对应设备；禁止回退到 emulator-5554 等其它实例
+                if matched is not None:
+                    chosen = matched
+                elif len(online) == 1 and online[0].serial.startswith(host):
+                    chosen = online[0]
+                else:
+                    last_err = msg or f"{target} 未在设备列表中（在线 {len(online)} 台）"
                     continue
 
                 self.adb.use_device(chosen.serial)
-                # 从 serial 解析端口
                 connected_port = port
                 if ":" in chosen.serial:
                     try:
@@ -870,23 +879,30 @@ class MainWindow(QMainWindow):
                 tip = f"连接成功 · {label or chosen.serial} · 打开拼豆页后直接点开始绘图"
                 self.progress_label.setText(tip)
                 self._save_settings()
-                QMessageBox.information(
-                    self,
-                    "连接成功",
-                    f"{status}\n\n请打开游戏拼豆编辑页，然后直接点「开始绘图」。",
-                )
-                return
+                if not quiet:
+                    QMessageBox.information(
+                        self,
+                        "连接成功",
+                        f"{status}\n\n请打开游戏拼豆编辑页，然后直接点「开始绘图」。",
+                    )
+                return True
             except AdbError as exc:
                 last_err = str(exc)
                 continue
 
         self.device_label.setText("连接失败")
+        self.progress_label.setText("连接失败，请检查模拟器与端口配置")
         QMessageBox.warning(
             self,
-            "ADB",
-            "未能连接模拟器。已尝试用户端口及常见 MuMu 多开端口。\n\n"
+            "无法连接模拟器",
+            "未能按当前配置连接模拟器。\n\n"
+            "请确认：\n"
+            "· MuMu 已启动，且已开启 ADB\n"
+            "· 主机 / 端口正确（MuMu 12 默认 16384）\n"
+            "· adb.exe 路径可用\n\n"
             f"最后错误：{last_err or '未知'}",
         )
+        return False
 
     def _apply_calibration(self, calib: CalibrationData, status: str = "校准已更新") -> None:
         self.calib = calib
@@ -896,22 +912,11 @@ class MainWindow(QMainWindow):
         self._update_pixel_thumb()
         self.progress_label.setText(status)
 
-    def open_calibrate(self) -> bool:
-        """打开校准对话框（自动失败时的手动兜底）。成功保存返回 True。"""
-        if not self.adb.is_ready():
-            QMessageBox.information(self, "提示", "请先连接 ADB")
-            return False
-        dlg = CalibrateDialog(self.adb, self.calib, self)
-        if dlg.exec():
-            self._apply_calibration(dlg.result_calibration())
-            return True
-        return False
-
     def run_diagnose(self) -> None:
         """手动跑一遍识别诊断并弹出步骤报告。"""
         if not self.adb.is_ready():
-            QMessageBox.information(self, "提示", "请先连接 ADB")
-            return
+            if not self._try_connect_adb(quiet=True):
+                return
         self.progress_label.setText("正在诊断识别…")
         self.paint_detail.setText("诊断中…")
         QApplication.processEvents()
@@ -922,6 +927,9 @@ class MainWindow(QMainWindow):
             self.progress_label.setText("诊断失败")
             return
         if report.ok and report.calibration is not None:
+            report.calibration.paint_verified = False
+            report.calibration.screen_size = None
+            report.calibration.device_serial = self.adb.serial
             save_calibration(report.calibration)
             self._apply_calibration(report.calibration, status="诊断通过，校准已更新")
         else:
@@ -929,62 +937,117 @@ class MainWindow(QMainWindow):
             self.paint_detail.setText(report.summary)
         show_diagnose_report(self, report)
 
-    def run_auto_calibrate(self, *, quiet: bool = False) -> bool:
+    def run_auto_calibrate(self, *, quiet: bool = False, shot=None) -> bool:
         """截图并全自动校准。成功写入 calibration.json 后返回 True。"""
         if not self.adb.is_ready():
             if not quiet:
-                QMessageBox.information(self, "提示", "请先连接 ADB")
+                QMessageBox.information(self, "提示", "请先连接模拟器")
             return False
         try:
-            shot = self.adb.screencap()
+            if shot is None:
+                shot = self.adb.screencap()
         except AdbError as exc:
+            err = str(exc)
             if not quiet:
-                QMessageBox.warning(self, "截图失败", str(exc))
+                if "more than one" in err.lower():
+                    QMessageBox.warning(
+                        self,
+                        "截图失败",
+                        "检测到多个 ADB 设备，尚未选定模拟器。\n"
+                        "请点「连接模拟器」，或直接再点一次「开始绘图」以自动连接。\n\n"
+                        f"详情：{err}",
+                    )
+                else:
+                    QMessageBox.warning(self, "截图失败", err)
             return False
         result = auto_calibrate(shot)
         if not result.ok or result.calibration is None:
             if not quiet:
                 QMessageBox.warning(
                     self,
-                    "自动校准失败",
-                    f"{result.message}\n\n请确认已打开拼豆编辑页（色板默认在顶部即可）。",
+                    "自动识别失败",
+                    f"{result.message}\n\n请确认已打开拼豆编辑页，可点「诊断识别」查看详情。",
                 )
             return False
+        # 新识别尚未经绘图验证
+        result.calibration.paint_verified = False
+        result.calibration.screen_size = (int(shot.shape[1]), int(shot.shape[0]))
+        result.calibration.device_serial = self.adb.serial
         save_calibration(result.calibration)
-        self._apply_calibration(result.calibration, status="自动校准完成")
+        self._apply_calibration(result.calibration, status="自动识别完成")
         if not quiet:
-            QMessageBox.information(self, "自动校准", result.message)
+            QMessageBox.information(self, "自动识别", result.message)
         else:
             self.paint_detail.setText(result.message)
         return True
 
     def ensure_ready_to_paint(self) -> bool:
-        """开始绘制前静默自动校准；失败时可改用手动校准。"""
+        """开始绘制前：确保已连接；若已有成功绘图校准则复用，否则重新识别。"""
+        if not self.adb.is_ready():
+            self.progress_label.setText("未连接，正在按默认配置连接…")
+            self.paint_detail.setText("自动连接中…")
+            QApplication.processEvents()
+            if not self._try_connect_adb(quiet=True):
+                return False
+
+        # 快速截图核对分辨率；上次绘图成功且同设备同分辨率则跳过识别
+        try:
+            shot = self.adb.screencap()
+        except AdbError:
+            self.progress_label.setText("识别未成功，正在重新连接后重试…")
+            QApplication.processEvents()
+            if not self._try_connect_adb(quiet=True):
+                self.progress_label.setText("识别失败")
+                return False
+            try:
+                shot = self.adb.screencap()
+            except AdbError as exc:
+                QMessageBox.warning(self, "截图失败", str(exc))
+                return False
+
+        h, w = shot.shape[:2]
+        serial = self.adb.serial
+        if self.calib.is_reusable_for(screen_w=w, screen_h=h, device_serial=serial):
+            self.progress_label.setText("沿用上次画布坐标…")
+            self.paint_detail.setText(
+                f"复用校准 · 画布 {self.calib.canvas_rect()[2]}×{self.calib.canvas_rect()[3]}"
+                if self.calib.canvas_rect()
+                else "复用上次校准"
+            )
+            QApplication.processEvents()
+            return True
+
         self.progress_label.setText("正在自动识别画布与颜料…")
-        self.paint_detail.setText("自动校准中…")
+        self.paint_detail.setText("自动识别中…")
         QApplication.processEvents()
+        if self.run_auto_calibrate(quiet=True, shot=shot):
+            return True
+
+        self.progress_label.setText("识别未成功，正在重新连接后重试…")
+        QApplication.processEvents()
+        if not self._try_connect_adb(quiet=True):
+            self.progress_label.setText("识别失败")
+            return False
         if self.run_auto_calibrate(quiet=True):
             return True
+
         if self.debug_mode.isChecked():
             try:
                 report = run_diagnose(self.adb, min_confidence=self.conf_spin.value())
                 show_diagnose_report(self, report, extra="开始绘图前自动识别失败。")
             except Exception:  # noqa: BLE001
                 pass
-        reply = QMessageBox.question(
+        QMessageBox.warning(
             self,
             "自动识别未完成",
-            "未能自动识别画布或颜料栏。\n"
-            "请确认已打开拼豆编辑页。\n\n"
-            "可点「诊断识别」查看截图与步骤。\n"
-            "是否改用手动校准？",
-            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
-            QMessageBox.StandardButton.Yes,
+            "未能自动识别画布或颜料栏。\n\n"
+            "请确认：\n"
+            "· 已连接模拟器（左侧显示「已连接」）\n"
+            "· 游戏已打开拼豆编辑页，画布与色板完整可见\n\n"
+            "可点「诊断识别」查看截图与步骤。",
         )
-        if reply != QMessageBox.StandardButton.Yes:
-            self.progress_label.setText("已取消")
-            return False
-        return self.open_calibrate()
+        self.progress_label.setText("识别失败")
+        return False
 
     def toggle_paint(self) -> None:
         if self._worker and self._worker.isRunning():
@@ -994,9 +1057,6 @@ class MainWindow(QMainWindow):
 
     def start_paint(self) -> None:
         if self._worker and self._worker.isRunning():
-            return
-        if not self.adb.is_ready():
-            QMessageBox.information(self, "提示", "请先连接 ADB")
             return
 
         if not self.ensure_ready_to_paint():
@@ -1067,6 +1127,23 @@ class MainWindow(QMainWindow):
         self.paint_progress.setValue(1000)
         self.paint_detail.setText("绘制完成")
         self.progress_label.setText("绘制完成")
+        # 标记本次校准可复用，直到分辨率/设备变化
+        if self.calib.screen_size:
+            w, h = self.calib.screen_size
+        else:
+            try:
+                shot = self.adb.screencap()
+                h, w = shot.shape[:2]
+            except Exception:  # noqa: BLE001
+                rect = self.calib.canvas_rect()
+                if rect:
+                    w, h = max(rect[0] + rect[2], 1), max(rect[1] + rect[3], 1)
+                else:
+                    w, h = 1920, 1080
+        self.calib.mark_paint_verified(
+            screen_w=w, screen_h=h, device_serial=self.adb.serial
+        )
+        save_calibration(self.calib)
         QMessageBox.information(self, "完成", "自动绘图已结束")
 
     def _on_paint_failed(self, message: str) -> None:

@@ -14,7 +14,7 @@ from PySide6.QtWidgets import (
 
 from arkpaint.ui.theme import app_icon
 
-_HANDLE = 10  # 角点热区半宽（显示坐标）
+_HANDLE = 14  # 角点热区半宽（显示坐标）
 _MIN_SIDE = 16  # 原图像素最小边长
 
 
@@ -142,19 +142,23 @@ class _SquareCropView(QWidget):
         dest = QRect(self._offset.x(), self._offset.y(), dw, dh)
         p.drawPixmap(dest, self._src)
 
-        # 遮罩挖空选区
-        p.fillRect(self.rect(), QColor(20, 24, 30, 120))
+        # 遮罩挖空选区（更深，突出边界）
+        p.fillRect(self.rect(), QColor(8, 10, 14, 160))
         sel = self._sel_view_rect()
         if sel.width() > 2 and sel.height() > 2:
             src_rect = self.selection_rect()
             p.drawPixmap(sel, self._src, src_rect)
-            p.setPen(QPen(QColor(94, 200, 192), 2))
-            p.drawRect(sel.adjusted(0, 0, -1, -1))
-            # 角点
-            p.setBrush(QColor(42, 130, 244))
-            p.setPen(QPen(QColor(255, 255, 255), 1))
+            # 外描边（深色）+ 内描边（亮青），边界更醒目
+            outer = sel.adjusted(0, 0, -1, -1)
+            p.setPen(QPen(QColor(20, 28, 36), 5))
+            p.drawRect(outer)
+            p.setPen(QPen(QColor(80, 240, 220), 3))
+            p.drawRect(outer)
+            # 角点更大、对比更强
+            p.setBrush(QColor(255, 214, 10))
+            p.setPen(QPen(QColor(20, 28, 36), 2))
             for pt in (sel.topLeft(), sel.topRight(), sel.bottomLeft(), sel.bottomRight()):
-                p.drawRect(QRect(pt.x() - 4, pt.y() - 4, 8, 8))
+                p.drawRect(QRect(pt.x() - 6, pt.y() - 6, 12, 12))
 
             tip = f"{self._side} × {self._side}"
             p.setPen(QColor(255, 255, 255))
@@ -276,8 +280,16 @@ class SquareCropDialog(QDialog):
         buttons = QDialogButtonBox(
             QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel
         )
-        buttons.button(QDialogButtonBox.StandardButton.Ok).setText("确认转化")
-        buttons.button(QDialogButtonBox.StandardButton.Cancel).setText("取消")
+        ok_btn = buttons.button(QDialogButtonBox.StandardButton.Ok)
+        cancel_btn = buttons.button(QDialogButtonBox.StandardButton.Cancel)
+        ok_btn.setText("确认转化")
+        ok_btn.setObjectName("primaryButton")
+        ok_btn.setMinimumHeight(36)
+        ok_btn.setMinimumWidth(120)
+        ok_btn.style().unpolish(ok_btn)
+        ok_btn.style().polish(ok_btn)
+        cancel_btn.setText("取消")
+        cancel_btn.setMinimumHeight(36)
         buttons.accepted.connect(self._accept)
         buttons.rejected.connect(self.reject)
         root.addWidget(buttons)

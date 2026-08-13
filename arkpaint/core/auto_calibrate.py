@@ -15,7 +15,8 @@ import numpy as np
 
 from arkpaint.config import GRID_SIZE, PALETTE_COLUMNS
 from arkpaint.core.calibration import CalibrationData
-from arkpaint.core.detector import detect_canvas, detect_ui_panel_bounds
+from arkpaint.core.detector import detect_canvas
+from arkpaint.core.palette_align import PALETTE_VISIBLE_ROWS
 
 
 @dataclass
@@ -30,17 +31,17 @@ class AutoCalibrateResult:
 def _palette_roi_bounds(
     bgr: np.ndarray, canvas: tuple[int, int, int, int]
 ) -> tuple[int, int, int, int]:
-    """颜料栏 ROI：优先右侧面板 + 与采样脚本一致的比例。"""
+    """颜料栏 ROI：画布右侧，覆盖完整 4 列色块。"""
     h, w = bgr.shape[:2]
     _cx, _cy, cw, _ch = canvas
-    _left, right_panel = detect_ui_panel_bounds(bgr)
-    # 与 tools/sample_palette_from_shots.py 一致，适配 1-24 / 16-40 截图
-    x0 = max(int(w * 0.68), _left + cw + max(8, cw // 40))
-    x1 = min(w, max(x0 + 80, int(w * 0.905), right_panel - 4))
+    # 不用 detect_ui_panel_bounds 的右缘限 x1：末列色块常超出该边界
+    canvas_right = canvas[0] + cw
+    x0 = max(int(w * 0.68), canvas_right + max(8, cw // 40))
+    x1 = min(w - 2, max(x0 + 120, int(w * 0.98)))
     y0 = int(h * 0.355)
     y1 = int(h * 0.92)
     if x1 - x0 < 40 or y1 - y0 < 80:
-        x0, x1 = int(w * 0.68), int(w * 0.92)
+        x0, x1 = int(w * 0.68), int(w * 0.98)
         y0, y1 = int(h * 0.34), int(h * 0.94)
     return x0, y0, x1, y1
 
@@ -202,6 +203,66 @@ def _build_scroll(
     return (cx, y_from), (cx, y_to)
 
 
+def refresh_palette_layout(
+    bgr: np.ndarray,
+    calib: CalibrationData,
+    *,
+    columns: int = PALETTE_COLUMNS,
+) -> bool:
+    """在画布已校准的前提下，根据当前截图重测颜料原点与间距。
+
+    用于滑动停稳后刷新槽位，避免「非顶部起步校准 → 回顶后仍用旧坐标」点偏 2 号色。
+    """
+    canvas = calib.canvas_rect()
+    if canvas is None or bgr is None or bgr.size == 0:
+        return False
+
+    x, y, w, h = canvas
+    img_h, img_w = bgr.shape[:2]
+    roi_candidates: list[tuple[int, int, int, int]] = [
+        _palette_roi_bounds(bgr, canvas),
+        (int(img_w * 0.68), int(img_h * 0.34), int(img_w * 0.98), int(img_h * 0.94)),
+        (int(img_w * 0.66), int(img_h * 0.30), int(img_w * 0.97), int(img_h * 0.96)),
+    ]
+
+    for x0, y0, x1, y1 in roi_candidates:
+        x0 = max(0, min(x0, img_w - 2))
+        x1 = max(x0 + 2, min(x1, img_w))
+        y0 = max(0, min(y0, img_h - 2))
+        y1 = max(y0 + 2, min(y1, img_h))
+        roi = bgr[y0:y1, x0:x1]
+        cells = detect_palette_cells(roi)
+        if len(cells) < max(8, columns * 2):
+            continue
+        try:
+            ox_r, oy_r, dx, dy = grid_from_cells(cells, columns=columns)
+        except RuntimeError:
+            continue
+        ox = float(x0 + ox_r)
+        oy = float(y0 + oy_r)
+        if ox < x + w * 0.85:
+            continue
+        if dx < 20 or dy < 20:
+            continue
+
+        visible_rows = _count_visible_rows(cells, ox_r, oy_r, dx, dy, columns, roi.shape[0])
+        # 游戏颜料栏固定 6 行完整可见；检测值易偏小导致 25+ 槽位错位
+        visible_rows = PALETTE_VISIBLE_ROWS
+        rps = max(1, min(calib.rows_per_scroll or 3, visible_rows - 1))
+        scroll_from, scroll_to = _build_scroll(ox, oy, dx, dy, visible_rows, rps)
+
+        calib.palette_origin = (int(round(ox)), int(round(oy)))
+        calib.palette_dx = float(dx)
+        calib.palette_dy = float(dy)
+        calib.palette_columns = columns
+        calib.visible_rows = visible_rows
+        calib.scroll_from = scroll_from
+        calib.scroll_to = scroll_to
+        calib.rows_per_scroll = rps
+        return True
+    return False
+
+
 def auto_calibrate(
     bgr: np.ndarray,
     *,
@@ -229,8 +290,8 @@ def auto_calibrate(
     # 优先画布右侧 ROI；不足时回退到固定比例裁剪（与历史采样一致）
     roi_candidates: list[tuple[int, int, int, int]] = [
         _palette_roi_bounds(bgr, canvas),
-        (int(img_w * 0.68), int(img_h * 0.34), int(img_w * 0.92), int(img_h * 0.94)),
-        (int(img_w * 0.66), int(img_h * 0.30), int(img_w * 0.95), int(img_h * 0.96)),
+        (int(img_w * 0.68), int(img_h * 0.34), int(img_w * 0.96), int(img_h * 0.94)),
+        (int(img_w * 0.66), int(img_h * 0.30), int(img_w * 0.97), int(img_h * 0.96)),
     ]
 
     last_cells = 0
@@ -256,12 +317,12 @@ def auto_calibrate(
         oy = float(y0 + oy_r)
         # 原点应落在画布右侧，避免误检左侧导航预览
         if ox < x + w * 0.85:
-            last_err = "色板位置异常（疑似误检），请重试或手动校准"
+            last_err = "色板位置异常（疑似误检），请重试或点「诊断识别」"
             continue
 
         visible_rows = _count_visible_rows(cells, ox_r, oy_r, dx, dy, columns, roi.shape[0])
-        visible_rows = min(6, max(3, visible_rows))
-        rps = max(1, min(rows_per_scroll, visible_rows - 1 if visible_rows > 1 else 1))
+        visible_rows = PALETTE_VISIBLE_ROWS
+        rps = max(1, min(rows_per_scroll, visible_rows - 1))
 
         scroll_from, scroll_to = _build_scroll(ox, oy, dx, dy, visible_rows, rps)
         sampled = _sample_colors(bgr, ox, oy, dx, dy, columns, visible_rows)
@@ -280,6 +341,9 @@ def auto_calibrate(
             scroll_duration_ms=350,
             rows_per_scroll=rps,
             sampled_rgbs=sampled,
+            paint_verified=False,
+            screen_size=(img_w, img_h),
+            device_serial=None,
         )
 
         msg = (

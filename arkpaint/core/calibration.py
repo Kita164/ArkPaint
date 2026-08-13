@@ -10,7 +10,7 @@ from arkpaint.config import CALIBRATION_PATH, GRID_SIZE, PALETTE_COLUMNS, load_j
 
 @dataclass
 class CalibrationData:
-    """一次手动校准的结果。
+    """自动识别得到的画布与颜料栏坐标。
 
     颜料栏：以「第 1 色」中心为原点，按列数与单元格间距推算点击坐标；
     超出可见行时，用 swipe 上滑露出后续颜色。
@@ -40,6 +40,11 @@ class CalibrationData:
     # 采样得到的 RGB 列表（可选，覆盖默认色盘）
     sampled_rgbs: list[list[int]] = field(default_factory=list)
 
+    # 上次绘图成功后可复用：同设备、同分辨率下跳过重新识别画布
+    paint_verified: bool = False
+    screen_size: tuple[int, int] | None = None  # (w, h)
+    device_serial: str | None = None
+
     def canvas_rect(self) -> tuple[int, int, int, int] | None:
         if not self.canvas_tl or not self.canvas_br:
             return None
@@ -57,6 +62,43 @@ class CalibrationData:
 
     def is_canvas_ready(self) -> bool:
         return self.canvas_rect() is not None
+
+    def is_reusable_for(
+        self,
+        *,
+        screen_w: int,
+        screen_h: int,
+        device_serial: str | None,
+    ) -> bool:
+        """是否可跳过重新识别，直接沿用上次成功绘图的坐标。"""
+        if not self.paint_verified or not self.is_canvas_ready() or not self.is_palette_ready():
+            return False
+        if not self.screen_size:
+            return False
+        if self.screen_size[0] != screen_w or self.screen_size[1] != screen_h:
+            return False
+        if device_serial and self.device_serial and self.device_serial != device_serial:
+            return False
+        rect = self.canvas_rect()
+        if rect is None:
+            return False
+        x, y, w, h = rect
+        if x < 0 or y < 0 or x + w > screen_w or y + h > screen_h:
+            return False
+        if self.palette_origin is None:
+            return False
+        ox, oy = self.palette_origin
+        if not (0 <= ox < screen_w and 0 <= oy < screen_h):
+            return False
+        return True
+
+    def mark_paint_verified(self, *, screen_w: int, screen_h: int, device_serial: str | None) -> None:
+        self.paint_verified = True
+        self.screen_size = (int(screen_w), int(screen_h))
+        self.device_serial = device_serial
+
+    def clear_paint_verified(self) -> None:
+        self.paint_verified = False
 
     def color_center(self, color_index: int) -> tuple[int, int]:
         """色号（1-based）在「当前滚动到顶部」时的理论坐标。"""
@@ -137,6 +179,9 @@ class CalibrationData:
             scroll_duration_ms=int(data.get("scroll_duration_ms") or 350),
             rows_per_scroll=int(data.get("rows_per_scroll") or 3),
             sampled_rgbs=list(data.get("sampled_rgbs") or []),
+            paint_verified=bool(data.get("paint_verified")),
+            screen_size=tup(data.get("screen_size")),
+            device_serial=(str(data["device_serial"]) if data.get("device_serial") else None),
         )
 
 

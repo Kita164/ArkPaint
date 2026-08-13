@@ -121,13 +121,35 @@ class AdbController:
         return _decode_png(data)
 
     def is_ready(self) -> bool:
+        """是否已选定可用设备（必须绑定 serial，避免多设备时裸 adb 报错）。"""
         try:
             devices = self.list_devices()
         except AdbError:
             return False
+        online = [d for d in devices if d.state == "device"]
+        if not online:
+            return False
         if self.serial:
-            return any(d.serial == self.serial and d.state == "device" for d in devices)
-        return any(d.state == "device" for d in devices)
+            return any(d.serial == self.serial for d in online)
+        # 仅一台设备时自动绑定，便于「开始绘图」直接用
+        if len(online) == 1:
+            self.serial = online[0].serial
+            return True
+        return False
+
+    def ensure_serial(self) -> bool:
+        """若尚未选定设备：唯一在线则绑定；多设备则返回 False（需显式 connect）。"""
+        if self.is_ready():
+            return True
+        try:
+            devices = self.list_devices()
+        except AdbError:
+            return False
+        online = [d for d in devices if d.state == "device"]
+        if len(online) == 1:
+            self.serial = online[0].serial
+            return True
+        return False
 
 
 def _decode_png(data: bytes) -> np.ndarray:
